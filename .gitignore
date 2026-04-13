@@ -22,6 +22,7 @@ Thumbs.db
 
 # Bot config (don't push secrets)
 .env
+config.py
 
 # Downloaded temp files
 packs/*_*.siq
