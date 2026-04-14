@@ -227,7 +227,6 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
     video_data = None
     video_filename = None
 
-    # Old format: <scenario><atom>...</atom></scenario>
     scenario_el = question_el.find('{0}scenario'.format(ns))
     if scenario_el is not None:
         for atom_el in scenario_el.findall('{0}atom'.format(ns)):
@@ -250,10 +249,6 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
                 if atom_text and video_data is None:
                     video_data, video_filename = _load_media(atom_text, 'Video', temp_dir)
 
-            elif atom_type == 'marker':
-                pass
-
-    # New format SIQ v5: <body><step>...</step></body>
     body_el = question_el.find('{0}body'.format(ns))
     if body_el is not None:
         for step_el in body_el:
@@ -291,10 +286,7 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
             else:
                 question_text = _append_text(question_text, step_text)
 
-    # Parse answer
     answer_text = _parse_answer(question_el, ns)
-
-    # Не подставляем заглушку — game.py сам определит fallback по медиа
     if not answer_text:
         answer_text = "(no answer)"
 
@@ -313,4 +305,50 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
 
 
 def _parse_answer(question_el, ns: str) -> str:
-    # Format 1 (old): <right><answer>text
+    right_el = question_el.find('{0}right'.format(ns))
+    if right_el is not None:
+        answer_els = right_el.findall('{0}answer'.format(ns))
+        if answer_els:
+            return '/'.join((a.text or '').strip() for a in answer_els if a.text)
+
+    answers_el = question_el.find('{0}answers'.format(ns))
+    if answers_el is not None:
+        right_el2 = answers_el.find('{0}right'.format(ns))
+        if right_el2 is not None:
+            answer_els = right_el2.findall('{0}answer'.format(ns))
+            if answer_els:
+                return '/'.join((a.text or '').strip() for a in answer_els if a.text)
+
+    return ''
+
+
+def _append_text(existing: str, new_part: str) -> str:
+    if not existing:
+        return new_part
+    return existing + ' ' + new_part
+
+
+def _load_media(resource_name: str, folder: str, temp_dir: str) -> Tuple[Optional[bytes], Optional[str]]:
+    decoded_name = urllib.parse.unquote(resource_name)
+    candidates = [
+        os.path.join(temp_dir, folder, decoded_name),
+        os.path.join(temp_dir, folder.lower(), decoded_name),
+        os.path.join(temp_dir, decoded_name),
+        os.path.join(temp_dir, folder, resource_name),
+        os.path.join(temp_dir, resource_name),
+    ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return f.read(), os.path.basename(path)
+
+    base_name = os.path.splitext(decoded_name)[0]
+    for root_dir, dirs, files in os.walk(temp_dir):
+        for fname in files:
+            if os.path.splitext(fname)[0].lower() == base_name.lower():
+                path = os.path.join(root_dir, fname)
+                with open(path, 'rb') as f:
+                    return f.read(), fname
+
+    return None, None
