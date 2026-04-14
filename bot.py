@@ -4,7 +4,6 @@ Telegram-бот "Своя Игра" на aiogram 3.x.
 """
 
 import os
-import io
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, Router, F, types
@@ -16,6 +15,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     BotCommand,
+    BufferedInputFile,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
@@ -85,66 +85,74 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
         await safe_send(g.chat_id, text, bot, thread_id)
 
     async def send_photo_callback(g, photo_data: bytes, filename: str | None):
-        """\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 \u0444\u043e\u0442\u043e. filename \u043d\u0443\u0436\u0435\u043d \u0447\u0442\u043e\u0431\u044b Telegram \u043f\u0440\u0438\u043d\u044f\u043b \u0444\u0430\u0439\u043b."""
+        """Отправляет фото. Использует BufferedInputFile для aiogram 3.x."""
+        fname = filename or "photo.jpg"
+        logger.info("Sending photo: %s (%d bytes)", fname, len(photo_data))
         try:
-            bio = io.BytesIO(photo_data)
-            # Telegram API \u0442\u0440\u0435\u0431\u0443\u0435\u0442 .name \u0447\u0442\u043e\u0431\u044b \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0430\u0442 \u0444\u0430\u0439\u043b\u0430
-            bio.name = filename or "photo.jpg"
+            input_file = BufferedInputFile(photo_data, filename=fname)
             await bot.send_photo(
                 chat_id=g.chat_id,
-                photo=bio,
+                photo=input_file,
                 message_thread_id=thread_id,
             )
-            logger.info("Photo sent: %s (%d bytes)", bio.name, len(photo_data))
+            logger.info("Photo sent OK: %s", fname)
         except Exception as e:
-            logger.error("Photo send error [%s, %d bytes]: %s", filename, len(photo_data) if photo_data else 0, e, exc_info=True)
-            # \u041f\u043e\u043f\u044b\u0442\u043a\u0430 \u0441 \u0440\u0430\u0437\u043d\u044b\u043c \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435\u043c \u0435\u0441\u043b\u0438 \u043f\u0435\u0440\u0432\u043e\u0435 \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u043e
+            logger.error("send_photo failed [%s]: %s", fname, e)
+            # Fallback: отправить как документ
             try:
-                bio2 = io.BytesIO(photo_data)
-                ext = (filename or '').rsplit('.', 1)[-1].lower() if filename and '.' in filename else 'jpg'
-                bio2.name = "photo." + ext
+                input_file2 = BufferedInputFile(photo_data, filename=fname)
                 await bot.send_document(
                     chat_id=g.chat_id,
-                    document=bio2,
+                    document=input_file2,
                     message_thread_id=thread_id,
                 )
-                logger.info("Photo sent as document fallback")
+                logger.info("Photo sent as document fallback: %s", fname)
             except Exception as e2:
-                logger.error("Photo fallback also failed: %s", e2)
+                logger.error("send_document fallback failed [%s]: %s", fname, e2)
 
-    async def send_audio_callback(g, audio_data, filename):
+    async def send_audio_callback(g, audio_data: bytes, filename: str | None):
+        fname = filename or "audio.mp3"
+        logger.info("Sending audio: %s (%d bytes)", fname, len(audio_data))
         try:
-            bio = io.BytesIO(audio_data)
-            bio.name = filename or "audio.mp3"
+            input_file = BufferedInputFile(audio_data, filename=fname)
             await bot.send_audio(
                 chat_id=g.chat_id,
-                audio=bio,
+                audio=input_file,
                 message_thread_id=thread_id,
             )
         except Exception as e:
-            logger.error("Audio error: %s", e)
+            logger.error("send_audio failed [%s]: %s", fname, e)
             try:
-                bio2 = io.BytesIO(audio_data)
-                bio2.name = "voice.ogg"
+                input_file2 = BufferedInputFile(audio_data, filename=fname)
                 await bot.send_voice(
                     chat_id=g.chat_id,
-                    voice=bio2,
+                    voice=input_file2,
                     message_thread_id=thread_id,
                 )
-            except Exception:
-                pass
+            except Exception as e2:
+                logger.error("send_voice fallback failed [%s]: %s", fname, e2)
 
-    async def send_video_callback(g, video_data, filename):
+    async def send_video_callback(g, video_data: bytes, filename: str | None):
+        fname = filename or "video.mp4"
+        logger.info("Sending video: %s (%d bytes)", fname, len(video_data))
         try:
-            bio = io.BytesIO(video_data)
-            bio.name = filename or "video.mp4"
+            input_file = BufferedInputFile(video_data, filename=fname)
             await bot.send_video(
                 chat_id=g.chat_id,
-                video=bio,
+                video=input_file,
                 message_thread_id=thread_id,
             )
         except Exception as e:
-            logger.error("Video error: %s", e)
+            logger.error("send_video failed [%s]: %s", fname, e)
+            try:
+                input_file2 = BufferedInputFile(video_data, filename=fname)
+                await bot.send_document(
+                    chat_id=g.chat_id,
+                    document=input_file2,
+                    message_thread_id=thread_id,
+                )
+            except Exception as e2:
+                logger.error("send_document video fallback failed [%s]: %s", fname, e2)
 
     async def show_board_callback(g):
         board_text = g.get_board_text()
@@ -578,7 +586,6 @@ async def handle_document(message: Message):
             thread_id,
             parse_mode=None,
         )
-        # Файл остаётся в packs/ для повторной загрузки через /loadpack
         logger.info("Pack saved: %s", file_path)
 
     except ValueError as e:
