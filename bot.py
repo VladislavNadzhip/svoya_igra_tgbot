@@ -9,13 +9,13 @@ import logging
 import asyncio
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.filters import Command, CommandStart
+from aiogram.enums import ParseMode
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     BotCommand,
-    ParseMode,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
@@ -683,7 +683,7 @@ async def handle_callback(callback: CallbackQuery):
 
 # ==================== ТЕКСТОВЫЕ СООБЩЕНИЯ ====================
 
-@router.message(F.text & ~Command.command)
+@router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
     if message.text is None or message.text.startswith('/'):
         return
