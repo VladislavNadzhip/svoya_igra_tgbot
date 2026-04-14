@@ -366,8 +366,10 @@ def _load_media(resource_ref: str, folder: str, temp_dir: str) -> Tuple[Optional
         return None, None
 
     decoded_name = urllib.parse.unquote(clean_name)
+    encoded_full = urllib.parse.quote(clean_name, safe='')
+    encoded_partial = urllib.parse.quote(clean_name, safe='#()-._')
 
-    name_variants = list(dict.fromkeys([clean_name, decoded_name]))
+    name_variants = list(dict.fromkeys([clean_name, decoded_name, encoded_full, encoded_partial]))
 
     folder_variants = list(dict.fromkeys([
         folder,

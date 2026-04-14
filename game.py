@@ -230,6 +230,15 @@ class Game:
             theme = self.current_round.themes[self.current_theme_index]
             header = f"🎯 *{theme.name}* за *{self.current_question.price}*\n\n"
             q_text = self.current_question.text
+            if not q_text or not q_text.strip():
+                if self.current_question.image:
+                    q_text = "📷 _Вопрос с изображением_"
+                elif self.current_question.audio:
+                    q_text = "🎵 _Вопрос с аудио_"
+                elif self.current_question.video:
+                    q_text = "🎬 _Вопрос с видео_"
+                else:
+                    q_text = "_Вопрос без текста_"
             await self.send_callback(self, header + q_text)
 
         # Отправляем медиа если есть

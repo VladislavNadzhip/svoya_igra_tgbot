@@ -1,0 +1,8 @@
+2026-04-14 17:37:42,621 - aiogram.dispatcher - INFO - Start polling
+2026-04-14 17:37:42,684 - aiogram.dispatcher - INFO - Run polling for bot @SvoyaIgra10_bot id=8736766342 - 'Своя Игра'
+2026-04-14 17:37:59,821 - aiogram.dispatcher - ERROR - Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+2026-04-14 17:37:59,822 - aiogram.dispatcher - WARNING - Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 8736766342)
+2026-04-14 17:38:04,999 - aiogram.dispatcher - ERROR - Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+2026-04-14 17:38:04,999 - aiogram.dispatcher - WARNING - Sleep for 1.260130 seconds and try again... (tryings = 1, bot id = 8736766342)
+2026-04-14 17:38:10,898 - aiogram.dispatcher - ERROR - Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+2026-04-14 17:38:10,898 - aiogram.dispatcher - WARNING - Sleep for 1.780189 seconds and try again... (tryings = 2, bot id = 8736766342)
