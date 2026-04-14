@@ -228,18 +228,24 @@ class Game:
 
         if self.send_callback:
             theme = self.current_round.themes[self.current_theme_index]
-            header = f"🎯 *{theme.name}* за *{self.current_question.price}*\n\n"
-            q_text = self.current_question.text
-            if not q_text or not q_text.strip():
-                if self.current_question.image:
-                    q_text = "📷 _Вопрос с изображением_"
-                elif self.current_question.audio:
-                    q_text = "🎵 _Вопрос с аудио_"
-                elif self.current_question.video:
-                    q_text = "🎬 _Вопрос с видео_"
+            q = self.current_question
+
+            header = f"🎯 *{theme.name}* за *{q.price}*"
+
+            q_text = (q.text or '').strip()
+
+            if not q_text:
+                # Вопрос содержит медиа — укажем тип медиа
+                if q.image:
+                    q_text = "🖼 Вопрос с изображением"
+                elif q.audio:
+                    q_text = "🎵 Вопрос с аудио"
+                elif q.video:
+                    q_text = "🎥 Вопрос с видео"
                 else:
-                    q_text = "_Вопрос без текста_"
-            await self.send_callback(self, header + q_text)
+                    q_text = "❓ Вопрос без текста"
+
+            await self.send_callback(self, f"{header}\n\n{q_text}")
 
         # Отправляем медиа если есть
         if self.current_question.image and self.send_photo_callback:
@@ -772,9 +778,8 @@ class GameManager:
         return self.packs.get(chat_id)
 
     def has_active_game(self, chat_id: int) -> bool:
-        """Есть ли активная игра в чате."""
-        game = self.games.get(chat_id)
-        if game is None:
-            return False
-        return game.state not in (GameState.IDLE, GameState.GAME_OVER)
-    
+    	"""Есть ли активная игра в чате."""
+    	game = self.games.get(chat_id)
+    	if game is None:
+    		return False
+    	return game.state not in (GameState.IDLE, GameState.GAME_OVER)
