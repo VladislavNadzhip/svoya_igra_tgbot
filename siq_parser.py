@@ -329,24 +329,51 @@ def _append_text(existing: str, new_part: str) -> str:
 
 
 def _load_media(resource_name: str, folder: str, temp_dir: str) -> Tuple[Optional[bytes], Optional[str]]:
+    """
+    Ищет медиафайл в распакованном архиве.
+    Поддерживает URL-encoded имена, пробелы, символ #, регистронезависимые папки.
+    """
+    # Декодируем URL-encoding (например %23 -> #, %20 -> пробел)
     decoded_name = urllib.parse.unquote(resource_name)
-    candidates = [
-        os.path.join(temp_dir, folder, decoded_name),
-        os.path.join(temp_dir, folder.lower(), decoded_name),
-        os.path.join(temp_dir, decoded_name),
-        os.path.join(temp_dir, folder, resource_name),
-        os.path.join(temp_dir, resource_name),
+
+    # Убираем лидирующий слеш если есть
+    decoded_name = decoded_name.lstrip('/')
+    resource_name_clean = resource_name.lstrip('/')
+
+    # Список вариантов для поиска: (папка, имя файла)
+    search_pairs = [
+        (folder,         decoded_name),
+        (folder.lower(), decoded_name),
+        (folder.upper(), decoded_name),
+        ('',             decoded_name),
+        (folder,         resource_name_clean),
+        (folder.lower(), resource_name_clean),
+        ('',             resource_name_clean),
     ]
 
-    for path in candidates:
+    for subfolder, fname in search_pairs:
+        if subfolder:
+            path = os.path.join(temp_dir, subfolder, fname)
+        else:
+            path = os.path.join(temp_dir, fname)
         if os.path.exists(path):
             with open(path, 'rb') as f:
                 return f.read(), os.path.basename(path)
 
-    base_name = os.path.splitext(decoded_name)[0]
+    # Последний шанс: обходим всё дерево и ищем по имени без учёта регистра
+    decoded_lower = decoded_name.lower()
+    decoded_base = os.path.splitext(decoded_lower)[0]
+
     for root_dir, dirs, files in os.walk(temp_dir):
         for fname in files:
-            if os.path.splitext(fname)[0].lower() == base_name.lower():
+            fname_lower = fname.lower()
+            # Точное совпадение по имени (без регистра)
+            if fname_lower == decoded_lower:
+                path = os.path.join(root_dir, fname)
+                with open(path, 'rb') as f:
+                    return f.read(), fname
+            # Совпадение только по основному имени (без расширения)
+            if os.path.splitext(fname_lower)[0] == decoded_base:
                 path = os.path.join(root_dir, fname)
                 with open(path, 'rb') as f:
                     return f.read(), fname
