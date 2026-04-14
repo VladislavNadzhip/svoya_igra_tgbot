@@ -294,7 +294,7 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
     # Parse answer
     answer_text = _parse_answer(question_el, ns)
 
-    # Оставляем text пустым — game.py сам определит fallback по медиа
+    # Не подставляем заглушку — game.py сам определит fallback по наличию медиа
     if not answer_text:
         answer_text = "(no answer)"
 
