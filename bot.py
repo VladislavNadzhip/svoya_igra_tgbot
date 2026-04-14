@@ -46,7 +46,7 @@ router = Router()
 # ==================== УТИЛИТЫ ====================
 
 def get_thread_id(message: Message) -> int | None:
-    """Извлекает message_thread_id (ID темы) из сообщения."""
+    """Извлекает message_thread_id (ИД темы) из сообщения."""
     return message.message_thread_id
 
 
@@ -84,15 +84,33 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
     async def send_callback(g, text):
         await safe_send(g.chat_id, text, bot, thread_id)
 
-    async def send_photo_callback(g, photo_data, filename):
+    async def send_photo_callback(g, photo_data: bytes, filename: str | None):
+        """\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 \u0444\u043e\u0442\u043e. filename \u043d\u0443\u0436\u0435\u043d \u0447\u0442\u043e\u0431\u044b Telegram \u043f\u0440\u0438\u043d\u044f\u043b \u0444\u0430\u0439\u043b."""
         try:
+            bio = io.BytesIO(photo_data)
+            # Telegram API \u0442\u0440\u0435\u0431\u0443\u0435\u0442 .name \u0447\u0442\u043e\u0431\u044b \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0444\u043e\u0440\u043c\u0430\u0442 \u0444\u0430\u0439\u043b\u0430
+            bio.name = filename or "photo.jpg"
             await bot.send_photo(
                 chat_id=g.chat_id,
-                photo=io.BytesIO(photo_data),
+                photo=bio,
                 message_thread_id=thread_id,
             )
+            logger.info("Photo sent: %s (%d bytes)", bio.name, len(photo_data))
         except Exception as e:
-            logger.error("Photo error: %s", e)
+            logger.error("Photo send error [%s, %d bytes]: %s", filename, len(photo_data) if photo_data else 0, e, exc_info=True)
+            # \u041f\u043e\u043f\u044b\u0442\u043a\u0430 \u0441 \u0440\u0430\u0437\u043d\u044b\u043c \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435\u043c \u0435\u0441\u043b\u0438 \u043f\u0435\u0440\u0432\u043e\u0435 \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u043e
+            try:
+                bio2 = io.BytesIO(photo_data)
+                ext = (filename or '').rsplit('.', 1)[-1].lower() if filename and '.' in filename else 'jpg'
+                bio2.name = "photo." + ext
+                await bot.send_document(
+                    chat_id=g.chat_id,
+                    document=bio2,
+                    message_thread_id=thread_id,
+                )
+                logger.info("Photo sent as document fallback")
+            except Exception as e2:
+                logger.error("Photo fallback also failed: %s", e2)
 
     async def send_audio_callback(g, audio_data, filename):
         try:
@@ -445,7 +463,6 @@ async def cmd_loadpack(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
 
-    # Извлекаем имя файла из команды
     command_text = message.text.strip()
     parts = command_text.split(maxsplit=1)
 
@@ -461,7 +478,6 @@ async def cmd_loadpack(message: Message):
         return
 
     file_name = parts[1].strip()
-
     file_path = os.path.join(PACKS_DIR, file_name)
 
     if not os.path.exists(file_path):
@@ -481,12 +497,7 @@ async def cmd_loadpack(message: Message):
             await safe_send(chat_id, "❌ Пак пустой — нет раундов.", message.bot, thread_id)
             return
 
-        total_q = sum(
-            len(t.questions)
-            for r in pack.rounds
-            for t in r.themes
-        )
-
+        total_q = sum(len(t.questions) for r in pack.rounds for t in r.themes)
         if total_q == 0:
             await safe_send(chat_id, "❌ Пак пустой — нет вопросов.", message.bot, thread_id)
             return
@@ -552,12 +563,7 @@ async def handle_document(message: Message):
             await safe_send(chat_id, "❌ Пак пустой — нет раундов.", message.bot, thread_id)
             return
 
-        total_q = sum(
-            len(t.questions)
-            for r in pack.rounds
-            for t in r.themes
-        )
-
+        total_q = sum(len(t.questions) for r in pack.rounds for t in r.themes)
         if total_q == 0:
             await safe_send(chat_id, "❌ Пак пустой — нет вопросов.", message.bot, thread_id)
             return
@@ -572,18 +578,14 @@ async def handle_document(message: Message):
             thread_id,
             parse_mode=None,
         )
+        # Файл остаётся в packs/ для повторной загрузки через /loadpack
+        logger.info("Pack saved: %s", file_path)
 
     except ValueError as e:
         await safe_send(chat_id, "❌ Ошибка парсинга: {}".format(e), message.bot, thread_id)
     except Exception as e:
         logger.error("Pack load error: %s", e, exc_info=True)
         await safe_send(chat_id, "❌ Ошибка: {}".format(e), message.bot, thread_id)
-    finally:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception:
-            pass
 
 
 # ==================== INLINE КНОПКИ ====================
@@ -594,7 +596,6 @@ async def handle_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
 
-    # Извлекаем thread_id из исходного сообщения
     thread_id = callback.message.message_thread_id
 
     game = manager.get_game(chat_id)
@@ -659,12 +660,10 @@ async def handle_callback(callback: CallbackQuery):
             await callback.answer("Вопрос уже сыгран", show_alert=True)
         return
 
-    # --- Сыгранный вопрос ---
     if data.startswith("played_"):
         await callback.answer("Уже сыграно")
         return
 
-    # --- Название темы ---
     if data.startswith("theme_info_"):
         if game and game.current_round:
             try:
@@ -722,10 +721,8 @@ async def main():
     )
     dp = Dispatcher()
 
-    # Регистрируем роутер
     dp.include_router(router)
 
-    # Устанавливаем команды
     commands = [
         BotCommand(command="start", description="Начать / Помощь"),
         BotCommand(command="help", description="Правила игры"),
