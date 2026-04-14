@@ -1,8 +1,7 @@
 """
 Парсер пакетов SIGame (.siq файлы).
 
-Медиафайлы читаются напрямую из ZIP-архива (без extractall),
-что избавляет проблем с кодировкой имён файлов (кириллица, #, пробелы).
+Медиафайлы читаются напрямую из ZIP-архива (без extractall).
 """
 
 import zipfile
@@ -55,10 +54,8 @@ def parse_siq(file_path: str) -> GamePack:
         raise ValueError("Файл не является валидным .siq (ZIP) архивом")
 
     with zipfile.ZipFile(file_path, 'r') as zf:
-        # Строим индекс файлов архива — единажды при открытии
         zip_index = _build_zip_index(zf)
 
-        # Читаем content.xml
         content_bytes = _read_content_xml(zf)
         if content_bytes is None:
             raise ValueError("content.xml не найден в архиве")
@@ -70,12 +67,10 @@ def parse_siq(file_path: str) -> GamePack:
         if root.tag.startswith('{'):
             ns = root.tag.split('}')[0] + '}'
 
-        pack = _parse_pack(root, ns, zf, zip_index)
-        return pack
+        return _parse_pack(root, ns, zf, zip_index)
 
 
 def _read_content_xml(zf: zipfile.ZipFile) -> Optional[bytes]:
-    """Reading content.xml from zip, searching case-insensitively."""
     for name in zf.namelist():
         if name.lower() == 'content.xml' or name.lower().endswith('/content.xml'):
             return zf.read(name)
@@ -84,33 +79,38 @@ def _read_content_xml(zf: zipfile.ZipFile) -> Optional[bytes]:
 
 def _build_zip_index(zf: zipfile.ZipFile) -> Dict[str, str]:
     """
-    Строит словарь: lowercase_basename -> real_zipname.
-    При конфликте имён победит вариант без URL-енкодинга.
-    Также хранит полный путь в lowercase.
+    Строит индекс: нормализованное_имя -> реальное_имя_в_zip.
+    Нормализация: URL-decode + lowercase.
+    Хранит как полный путь, так и только basename.
     """
     index = {}
+
+    def _add(key: str, value: str):
+        if key and key not in index:
+            index[key] = value
+
     for zip_name in zf.namelist():
-        # Полный путь lowercase
-        lower_full = zip_name.lower()
-        if lower_full not in index:
-            index[lower_full] = zip_name
+        # Сырое имя
+        _add(zip_name.lower(), zip_name)
 
-        # basename lowercase
-        basename = os.path.basename(zip_name).lower()
-        if basename and basename not in index:
-            index[basename] = zip_name
+        # URL-decoded полный путь
+        decoded_full = urllib.parse.unquote(zip_name).lower()
+        _add(decoded_full, zip_name)
 
-        # URL-decoded basename lowercase
-        decoded_base = urllib.parse.unquote(basename).lower()
-        if decoded_base and decoded_base not in index:
-            index[decoded_base] = zip_name
+        # basename (raw)
+        base_raw = os.path.basename(zip_name).lower()
+        _add(base_raw, zip_name)
 
-        # URL-decoded полный путь lowercase
-        decoded_full = urllib.parse.unquote(lower_full)
-        if decoded_full not in index:
-            index[decoded_full] = zip_name
+        # basename (decoded)
+        base_dec = urllib.parse.unquote(base_raw)
+        _add(base_dec, zip_name)
 
     return index
+
+
+def _normalize_resource(name: str) -> str:
+    """Снимает ледящие @ и / из имени ресурса."""
+    return name.lstrip('@').lstrip('/')
 
 
 def _read_media_from_zip(
@@ -121,29 +121,26 @@ def _read_media_from_zip(
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """
     Находит и читает медиафайл напрямую из ZIP.
-    Перебирает множество вариантов путей.
+    resource_name может начинаться с @ — он будет срезан.
     """
-    decoded = urllib.parse.unquote(resource_name).lstrip('/')
-    raw = resource_name.lstrip('/')
+    clean = _normalize_resource(resource_name)
+    decoded = urllib.parse.unquote(clean)
     base = os.path.basename(decoded)
 
-    # Все ключи которые нужно проверить в индексе
     candidates = [
-        # Полные пути с папкой
         f"{folder}/{decoded}",
         f"{folder.lower()}/{decoded}",
-        f"{folder}/{raw}",
-        f"{folder.lower()}/{raw}",
-        # Только basename
+        f"{folder}/{clean}",
+        f"{folder.lower()}/{clean}",
         decoded,
-        raw,
+        clean,
         base,
     ]
 
     for candidate in candidates:
-        lower = candidate.lower()
-        if lower in zip_index:
-            zip_entry = zip_index[lower]
+        key = candidate.lower()
+        if key in zip_index:
+            zip_entry = zip_index[key]
             data = zf.read(zip_entry)
             return data, os.path.basename(zip_entry)
 
@@ -156,7 +153,7 @@ def _try_all_folders(
     resource_name: str
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """Try all known media folders automatically."""
-    for folder in ('Images', 'Audio', 'Video', 'Sounds', 'Video'):
+    for folder in ('Images', 'Audio', 'Video', 'Sounds'):
         data, fname = _read_media_from_zip(zf, zip_index, resource_name, folder)
         if data:
             return data, fname
@@ -179,7 +176,6 @@ def get_pack_info(pack: GamePack) -> str:
         rtype = " (final)" if r.round_type == 'final' else ""
         lines.append("Round {}: {}{}".format(i, r.name, rtype))
         lines.append("   Themes: {}, questions: {}".format(len(r.themes), q_count))
-
         for t in r.themes:
             prices = [str(q.price) for q in t.questions]
             lines.append("   - {} [{}]".format(t.name, ', '.join(prices)))
@@ -198,9 +194,9 @@ def _parse_pack(root, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, str]) -
     if info_el is not None:
         authors_el = info_el.find('{0}authors'.format(ns))
         if authors_el is not None:
-            author_els = authors_el.findall('{0}author'.format(ns))
-            pack_author = ', '.join(a.text for a in author_els if a.text)
-
+            pack_author = ', '.join(
+                a.text for a in authors_el.findall('{0}author'.format(ns)) if a.text
+            )
         comments_el = info_el.find('{0}comments'.format(ns))
         if comments_el is not None and comments_el.text:
             pack_comment = comments_el.text
@@ -221,9 +217,7 @@ def _parse_pack(root, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, str]) -
 
 def _parse_round(round_el, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, str]) -> Round:
     round_name = round_el.attrib.get('name', 'Round')
-    raw_type = round_el.attrib.get('type', 'standard').lower()
-
-    round_type = 'final' if raw_type == 'final' else 'standard'
+    round_type = 'final' if round_el.attrib.get('type', '').lower() == 'final' else 'standard'
     game_round = Round(name=round_name, round_type=round_type)
 
     themes_el = round_el.find('{0}themes'.format(ns))
@@ -240,13 +234,12 @@ def _parse_round(round_el, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, st
 
 def _parse_theme(theme_el, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, str]) -> Theme:
     theme_name = theme_el.attrib.get('name', 'Theme')
-
     comment = ''
     info_el = theme_el.find('{0}info'.format(ns))
     if info_el is not None:
-        comments_el = info_el.find('{0}comments'.format(ns))
-        if comments_el is not None and comments_el.text:
-            comment = comments_el.text.strip()
+        c = info_el.find('{0}comments'.format(ns))
+        if c is not None and c.text:
+            comment = c.text.strip()
 
     theme = Theme(name=theme_name, comment=comment)
 
@@ -281,25 +274,22 @@ def _parse_question(
         type_map = {
             'cat': 'cat', 'bagcat': 'bagcat', 'auction': 'auction',
             'sponsored': 'standard', 'simple': 'standard',
-            'stake': 'auction', 'secret': 'cat',
-            'secretnoq': 'cat',
+            'stake': 'auction', 'secret': 'cat', 'secretnoq': 'cat',
         }
         question_type = type_map.get(qtype, 'standard')
 
     question_text = ''
-    image_data = None
-    image_filename = None
-    audio_data = None
-    audio_filename = None
-    video_data = None
-    video_filename = None
+    image_data = image_filename = None
+    audio_data = audio_filename = None
+    video_data = video_filename = None
 
     # ===== Старый формат: <scenario><atom> =====
     scenario_el = question_el.find('{0}scenario'.format(ns))
     if scenario_el is not None:
         for atom_el in scenario_el.findall('{0}atom'.format(ns)):
             atom_type = atom_el.attrib.get('type', '').lower()
-            atom_text = (atom_el.text or '').strip()
+            # Срезаем @ — в некоторых паках имя ресурса пишется со знаком @
+            atom_text = _normalize_resource((atom_el.text or '').strip())
 
             if atom_type in ('', 'text', 'say'):
                 if atom_text:
@@ -333,23 +323,18 @@ def _parse_question(
 
             step_text = (step_el.text or '').strip()
             if not step_text:
-                # Если текст в дочерних узлах
-                inner = ' '.join(
-                    (c.text or '').strip()
-                    for c in step_el
-                    if (c.text or '').strip()
-                )
-                step_text = inner.strip()
+                step_text = ' '.join(
+                    (c.text or '').strip() for c in step_el if (c.text or '').strip()
+                ).strip()
 
             if not step_text:
                 continue
 
             if step_text.startswith('@'):
-                resource_name = step_text[1:]
-                # Пробуем все папки автоматически
+                resource_name = step_text[1:]  # срезаем @
                 data, fname = _try_all_folders(zf, zip_index, resource_name)
                 if data:
-                    ext = (fname or '').lower().rsplit('.', 1)[-1] if fname else ''
+                    ext = fname.lower().rsplit('.', 1)[-1] if fname and '.' in fname else ''
                     if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp') and image_data is None:
                         image_data, image_filename = data, fname
                     elif ext in ('mp3', 'ogg', 'wav', 'flac', 'm4a') and audio_data is None:
@@ -357,10 +342,8 @@ def _parse_question(
                     elif ext in ('mp4', 'avi', 'mkv', 'mov', 'webm') and video_data is None:
                         video_data, video_filename = data, fname
                     elif image_data is None:
-                        # Если расширение неизвестно — пробуем как картинку
                         image_data, image_filename = data, fname
                 else:
-                    # Файл не найден — оставляем как текст (название ресурса)
                     question_text = _append_text(question_text, step_text)
             else:
                 question_text = _append_text(question_text, step_text)
@@ -386,22 +369,20 @@ def _parse_question(
 def _parse_answer(question_el, ns: str) -> str:
     right_el = question_el.find('{0}right'.format(ns))
     if right_el is not None:
-        answer_els = right_el.findall('{0}answer'.format(ns))
-        if answer_els:
-            return '/'.join((a.text or '').strip() for a in answer_els if a.text)
+        answers = [a.text.strip() for a in right_el.findall('{0}answer'.format(ns)) if a.text]
+        if answers:
+            return '/'.join(answers)
 
     answers_el = question_el.find('{0}answers'.format(ns))
     if answers_el is not None:
         right_el2 = answers_el.find('{0}right'.format(ns))
         if right_el2 is not None:
-            answer_els = right_el2.findall('{0}answer'.format(ns))
-            if answer_els:
-                return '/'.join((a.text or '').strip() for a in answer_els if a.text)
+            answers = [a.text.strip() for a in right_el2.findall('{0}answer'.format(ns)) if a.text]
+            if answers:
+                return '/'.join(answers)
 
     return ''
 
 
 def _append_text(existing: str, new_part: str) -> str:
-    if not existing:
-        return new_part
-    return existing + ' ' + new_part
+    return (existing + ' ' + new_part).strip() if existing else new_part
