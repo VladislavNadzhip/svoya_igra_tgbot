@@ -294,9 +294,7 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
     # Parse answer
     answer_text = _parse_answer(question_el, ns)
 
-    if not question_text and not image_data and not audio_data and not video_data:
-        question_text = "(empty question)"
-
+    # Оставляем text пустым — game.py сам определит fallback по медиа
     if not answer_text:
         answer_text = "(no answer)"
 
@@ -315,92 +313,4 @@ def _parse_question(question_el, ns: str, temp_dir: str) -> Optional[Question]:
 
 
 def _parse_answer(question_el, ns: str) -> str:
-    # Format 1: <right><answer>text</answer></right>
-    right_el = question_el.find('{0}right'.format(ns))
-    if right_el is not None:
-        answers = _extract_answers(right_el, ns)
-        if answers:
-            return ' / '.join(answers)
-        if right_el.text and right_el.text.strip():
-            return right_el.text.strip()
-
-    # Format 2: <answers><right><answer>text</answer></right></answers>
-    answers_el = question_el.find('{0}answers'.format(ns))
-    if answers_el is not None:
-        right_el2 = answers_el.find('{0}right'.format(ns))
-        if right_el2 is not None:
-            answers = _extract_answers(right_el2, ns)
-            if answers:
-                return ' / '.join(answers)
-            if right_el2.text and right_el2.text.strip():
-                return right_el2.text.strip()
-
-        answers = _extract_answers(answers_el, ns)
-        if answers:
-            return ' / '.join(answers)
-
-    return ''
-
-
-def _extract_answers(parent_el, ns: str) -> List[str]:
-    answer_els = parent_el.findall('{0}answer'.format(ns))
-    results = []
-    for a in answer_els:
-        if a.text and a.text.strip():
-            results.append(a.text.strip())
-    return results
-
-
-def _append_text(existing: str, new: str) -> str:
-    if existing:
-        return existing + '\n' + new
-    return new
-
-
-def _load_media(resource_ref: str, folder: str, temp_dir: str) -> Tuple[Optional[bytes], Optional[str]]:
-    if not resource_ref:
-        return None, None
-
-    clean_name = resource_ref.lstrip('@').strip()
-    if not clean_name:
-        return None, None
-
-    decoded_name = urllib.parse.unquote(clean_name)
-    encoded_full = urllib.parse.quote(clean_name, safe='')
-    encoded_partial = urllib.parse.quote(clean_name, safe='#()-._')
-
-    name_variants = list(dict.fromkeys([clean_name, decoded_name, encoded_full, encoded_partial]))
-
-    folder_variants = list(dict.fromkeys([
-        folder,
-        folder.lower(),
-        folder.upper(),
-        folder.capitalize(),
-    ]))
-
-    for fname in name_variants:
-        for fdir in folder_variants:
-            path = os.path.join(temp_dir, fdir, fname)
-            if os.path.exists(path) and os.path.isfile(path):
-                try:
-                    with open(path, 'rb') as f:
-                        data = f.read()
-                    if len(data) > 0:
-                        return data, os.path.basename(path)
-                except (IOError, OSError):
-                    continue
-
-    # Recursive search
-    for fname in name_variants:
-        for root_dir, dirs, files in os.walk(temp_dir):
-            if fname in files:
-                path = os.path.join(root_dir, fname)
-                try:
-                    with open(path, 'rb') as f:
-                        data = f.read()
-                    if len(data) > 0:
-                        return data, fname
-                except (IOError, OSError):
-                    continue
-
-    return None, None
+    # Format 1: <right><answer>text
