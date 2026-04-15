@@ -37,7 +37,8 @@ manager = GameManager()
 buzzer_messages: dict = {}   # chat_id -> message_id
 appeal_messages: dict = {}   # chat_id -> message_id
 
-PACKS_DIR = "packs"
+# Абсолютный путь к папке packs/ рядом с bot.py
+PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs")
 os.makedirs(PACKS_DIR, exist_ok=True)
 
 router = Router()
@@ -47,6 +48,14 @@ router = Router()
 
 def get_thread_id(message: Message) -> int | None:
     return message.message_thread_id
+
+
+def escape_md(text: str) -> str:
+    """Экранирует спецсимволы для MarkdownV1 (aiogram ParseMode.MARKDOWN)."""
+    # В режиме ParseMode.MARKDOWN опасны: *, _, `, [
+    for ch in ('*', '_', '`', '['):
+        text = text.replace(ch, '\\' + ch)
+    return text
 
 
 async def safe_send(chat_id: int, text: str, bot: Bot,
@@ -480,24 +489,55 @@ async def cmd_appeal(message: Message):
 async def cmd_listpacks(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
-    if not os.path.exists(PACKS_DIR):
-        await safe_send(chat_id, "📁 Папка packs/ не создана.", message.bot, thread_id)
+
+    logger.info("listpacks: PACKS_DIR = %s", PACKS_DIR)
+
+    if not os.path.isdir(PACKS_DIR):
+        await safe_send(
+            chat_id,
+            "📁 Папка packs/ не найдена по пути:\n{}\n\nСоздайте её и положите туда .siq файлы.".format(PACKS_DIR),
+            message.bot, thread_id,
+            parse_mode=None,
+        )
         return
-    files = [f for f in os.listdir(PACKS_DIR) if f.lower().endswith('.siq')]
+
+    try:
+        all_files = os.listdir(PACKS_DIR)
+    except Exception as e:
+        logger.error("listpacks os.listdir error: %s", e)
+        await safe_send(chat_id, "❌ Не удалось прочитать папку packs/: {}".format(e),
+                        message.bot, thread_id, parse_mode=None)
+        return
+
+    logger.info("listpacks: всего файлов в папке: %d", len(all_files))
+
+    files = [f for f in all_files if f.lower().endswith('.siq')]
+    logger.info("listpacks: .siq файлов: %d", len(files))
+
     if not files:
         await safe_send(
             chat_id,
-            "📁 Папка packs/ пуста.\nПоложите туда .siq файлы и используйте /loadpack <имя>",
+            "📁 В папке packs/ нет .siq файлов.\n"
+            "Положите туда .siq файлы и используйте /loadpack <имя>",
             message.bot, thread_id,
+            parse_mode=None,
         )
         return
-    lines = ["📁 *Доступные паки в packs/:*\n"]
-    for i, f in enumerate(files, 1):
+
+    lines = ["📁 Доступные паки в packs/:\n"]
+    for i, f in enumerate(sorted(files), 1):
         size_mb = os.path.getsize(os.path.join(PACKS_DIR, f)) / (1024 * 1024)
-        lines.append("{}. `{}` ({:.1f} МБ)".format(i, f, size_mb))
+        # Экранируем имя файла — не используем backtick чтобы избежать ошибок Markdown
+        lines.append("{}. {} ({:.1f} МБ)".format(i, f, size_mb))
     lines.append("\n💡 Используйте /loadpack <имя_файла> для загрузки")
-    await safe_send(chat_id, "\n".join(lines), message.bot, thread_id,
-                    parse_mode=ParseMode.MARKDOWN)
+
+    await safe_send(
+        chat_id,
+        "\n".join(lines),
+        message.bot,
+        thread_id,
+        parse_mode=None,   # plain text — имена файлов могут содержать спецсимволы
+    )
 
 
 @router.message(Command("loadpack"))
@@ -515,8 +555,8 @@ async def cmd_loadpack(message: Message):
     file_name = parts[1].strip()
     file_path = os.path.join(PACKS_DIR, file_name)
     if not os.path.exists(file_path):
-        await safe_send(chat_id, "❌ Файл `{}` не найден в packs/.".format(file_name),
-                        message.bot, thread_id, parse_mode=ParseMode.MARKDOWN)
+        await safe_send(chat_id, "❌ Файл '{}' не найден в packs/.".format(file_name),
+                        message.bot, thread_id, parse_mode=None)
         return
     if not file_name.lower().endswith('.siq'):
         await safe_send(chat_id, "❌ Файл должен быть в формате .siq",
@@ -724,6 +764,7 @@ async def main():
         return
 
     print("🚀 Запуск бота Своя Игра (aiogram)...")
+    print("📁 Папка паков: {}".format(PACKS_DIR))
 
     bot = Bot(
         token=BOT_TOKEN,
