@@ -185,7 +185,7 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
         total = len(g.pack.rounds)
         rtype = " (Финал)" if r.round_type == 'final' else ""
         themes = '\n'.join("  - {}".format(t.name) for t in r.themes)
-        text = "🎬 *Раунд {}/{}: {}{}*\n\nТемы:\n{}".format(idx, total, r.name, rtype, themes)
+        text = "🎦 *Раунд {}/{}: {}{}*\n\nТемы:\n{}".format(idx, total, r.name, rtype, themes)
         await safe_send(g.chat_id, text, bot, thread_id)
         await asyncio.sleep(2)
 
@@ -264,8 +264,9 @@ async def cmd_help(message: Message):
         "📖 *Правила Своей Игры:*\n\n"
         "• Игрок выбирает тему и стоимость вопроса\n"
         "• Бот задаёт вопрос\n"
-        "• 🔔 Ответить — нажмите кнопку первым\n"
+        "• 🔔 Ответить — нажмите первым чтобы ответить\n"
         "• 🙅 Пас — пропустить вопрос без штрафа\n"
+        "• Пока отвечает другой — можно нажать кнопку заранее (встанете в очередь)\n"
         "• Правильный ответ: +очки\n"
         "• Неправильный ответ: −очки\n"
         "• Если все спасовали — вопрос пропускается сразу\n\n"
@@ -419,7 +420,6 @@ async def cmd_appeal(message: Message):
     if game.current_appeal is not None:
         await safe_send(chat_id, "⚠️ Апелляция уже идёт!", message.bot, thread_id)
         return
-    # Проверяем наличие ошибочного ответа в текущем или последнем вопросе
     in_current = user_id in game.failed_answerers
     in_last = user_id in game.last_failed_answerers
     if not in_current and not in_last:
@@ -581,7 +581,8 @@ async def handle_callback(callback: CallbackQuery):
         if user_id not in game.players:
             await callback.answer("Вы не в игре! /join", show_alert=True)
             return
-        if game.state != GameState.QUESTION_ASKED:
+        # Разрешаем нажать базер в QUESTION_ASKED и WAITING_ANSWER
+        if game.state not in (GameState.QUESTION_ASKED, GameState.WAITING_ANSWER):
             await callback.answer("Сейчас нельзя")
             return
         if user_id in game.failed_answerers:
@@ -590,9 +591,18 @@ async def handle_callback(callback: CallbackQuery):
         if user_id in game.passed_players:
             await callback.answer("Вы спасовали на этом вопросе", show_alert=True)
             return
+        if user_id == game.current_answerer_id:
+            await callback.answer("Вы уже отвечаете!")
+            return
+        if user_id in game.buzzer_queue:
+            await callback.answer("Вы уже в очереди")
+            return
         _apply_callbacks(game, callback.message.bot, thread_id)
         success = await game.press_buzzer(user_id)
-        await callback.answer("Вы отвечаете!" if success else "Кто-то уже отвечает")
+        if success:
+            await callback.answer("Вы отвечаете!")
+        else:
+            await callback.answer("Встали в очередь — ответите после текущего")
         return
 
     # --- Пас ---
