@@ -1,6 +1,6 @@
 """
 Telegram-бот "Своя Игра" на aiogram 3.x.
-Поддерживает темы (topics), апелляции, маскировку аудио-метаданных.
+Поддерживает темы (topics), апелляции, маскировку аудио, пас.
 """
 
 import os
@@ -23,21 +23,16 @@ from config import BOT_TOKEN, ANSWER_TIMEOUT, BUZZER_TIMEOUT
 from siq_parser import parse_siq, get_pack_info, GamePack
 from game import Game, GameManager, GameState
 
-# ==================== ЛОГИРОВАНИЕ ====================
-
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ГЛОБАЛЬНЫЕ ====================
-
 manager = GameManager()
-buzzer_messages: dict = {}   # chat_id -> message_id
-appeal_messages: dict = {}   # chat_id -> message_id
+buzzer_messages: dict = {}
+appeal_messages: dict = {}
 
-# Абсолютный путь к папке packs/ рядом с bot.py
 PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs")
 os.makedirs(PACKS_DIR, exist_ok=True)
 
@@ -50,33 +45,20 @@ def get_thread_id(message: Message) -> int | None:
     return message.message_thread_id
 
 
-def escape_md(text: str) -> str:
-    """Экранирует спецсимволы для MarkdownV1 (aiogram ParseMode.MARKDOWN)."""
-    # В режиме ParseMode.MARKDOWN опасны: *, _, `, [
-    for ch in ('*', '_', '`', '['):
-        text = text.replace(ch, '\\' + ch)
-    return text
-
-
 async def safe_send(chat_id: int, text: str, bot: Bot,
                     thread_id: int | None = None,
                     reply_markup=None,
                     parse_mode=ParseMode.MARKDOWN):
     try:
         return await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-            message_thread_id=thread_id,
+            chat_id=chat_id, text=text, reply_markup=reply_markup,
+            parse_mode=parse_mode, message_thread_id=thread_id,
         )
     except Exception as e:
         logger.error("Send error (markdown): %s", e)
         try:
             return await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
+                chat_id=chat_id, text=text, reply_markup=reply_markup,
                 message_thread_id=thread_id,
             )
         except Exception as e2:
@@ -95,7 +77,6 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
 
     async def send_photo_callback(g, photo_data: bytes, filename: str | None):
         fname = filename or "photo.jpg"
-        logger.info("Sending photo: %s (%d bytes)", fname, len(photo_data))
         try:
             input_file = BufferedInputFile(photo_data, filename=fname)
             await bot.send_photo(chat_id=g.chat_id, photo=input_file,
@@ -110,19 +91,13 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
                 logger.error("send_document photo fallback failed: %s", e2)
 
     async def send_audio_callback(g, audio_data: bytes, filename: str | None):
-        """
-        Аудио всегда отправляется под анонимным именем, чтобы не
-        раскрывать исполнителя/название трека участникам.
-        """
-        fname = "audio.mp3"          # фиксированное имя — скрывает оригинал
+        fname = "audio.mp3"
         logger.info("Sending audio (masked): %s (%d bytes)", filename, len(audio_data))
         try:
             input_file = BufferedInputFile(audio_data, filename=fname)
             await bot.send_audio(
-                chat_id=g.chat_id,
-                audio=input_file,
-                title="Своя Игра — Мелодия",
-                performer="?",
+                chat_id=g.chat_id, audio=input_file,
+                title="Своя Игра — Мелодия", performer="?",
                 message_thread_id=thread_id,
             )
         except Exception as e:
@@ -136,7 +111,6 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
 
     async def send_video_callback(g, video_data: bytes, filename: str | None):
         fname = filename or "video.mp4"
-        logger.info("Sending video: %s (%d bytes)", fname, len(video_data))
         try:
             input_file = BufferedInputFile(video_data, filename=fname)
             await bot.send_video(chat_id=g.chat_id, video=input_file,
@@ -152,13 +126,13 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
 
     async def show_board_callback(g):
         keyboard = _build_board_keyboard(g)
-        await safe_send(g.chat_id, g.get_board_text(), bot, thread_id,
-                        reply_markup=keyboard)
+        await safe_send(g.chat_id, g.get_board_text(), bot, thread_id, reply_markup=keyboard)
 
     async def show_buzzer_callback(g):
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔔 Ответить!", callback_data="buzzer")]
-        ])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔔 Ответить!", callback_data="buzzer"),
+            InlineKeyboardButton(text="🙅 Пас", callback_data="pass"),
+        ]])
         msg = await safe_send(g.chat_id, "⏳ Кто хочет ответить? Жмите кнопку!",
                               bot, thread_id, reply_markup=keyboard)
         if msg:
@@ -173,7 +147,6 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
                 pass
 
     async def show_appeal_callback(g):
-        """Отправляет или редактирует сообщение с кнопками апелляции."""
         text = g.get_appeal_status_text()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="👍 За", callback_data="appeal_yes"),
@@ -183,11 +156,8 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
         if existing:
             try:
                 await bot.edit_message_text(
-                    chat_id=g.chat_id,
-                    message_id=existing,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=g.chat_id, message_id=existing, text=text,
+                    reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN,
                 )
                 return
             except Exception:
@@ -251,8 +221,7 @@ def _build_board_keyboard(game):
         for q in theme_data['questions']:
             if q['played']:
                 price_row.append(InlineKeyboardButton(
-                    text="✖",
-                    callback_data="played_{}_{}".format(theme_data['theme_idx'], q['q_idx'])
+                    text="✖", callback_data="played_{}_{}".format(theme_data['theme_idx'], q['q_idx'])
                 ))
             else:
                 price_row.append(InlineKeyboardButton(
@@ -269,15 +238,11 @@ def _build_board_keyboard(game):
 async def cmd_start(message: Message):
     text = (
         "🎮 *Своя Игра — Telegram Bot*\n\n"
-        "Играйте в Свою Игру прямо в Telegram!\n\n"
         "📦 *Как начать:*\n"
-        "1. Создайте пакет вопросов на сайте:\n"
-        "   vladimirkhil.com/si/siquester\n"
-        "2. Скачайте .siq файл\n"
-        "3. Отправьте его в этот чат ИЛИ положите в папку packs/\n"
-        "4. /newgame — создать игру\n"
-        "5. /join — присоединиться\n"
-        "6. /startgame — начать!\n\n"
+        "1. Отправьте .siq файл в этот чат ИЛИ положите в папку packs/\n"
+        "2. /newgame — создать игру\n"
+        "3. /join — присоединиться\n"
+        "4. /startgame — начать!\n\n"
         "📋 *Команды:*\n"
         "/newgame — создать новую игру\n"
         "/join — присоединиться\n"
@@ -299,17 +264,16 @@ async def cmd_help(message: Message):
         "📖 *Правила Своей Игры:*\n\n"
         "• Игрок выбирает тему и стоимость вопроса\n"
         "• Бот задаёт вопрос\n"
-        "• Кто хочет ответить — жмёт 🔔\n"
-        "• Первый нажавший получает право ответа\n"
+        "• 🔔 Ответить — нажмите кнопку первым\n"
+        "• 🙅 Пас — пропустить вопрос без штрафа\n"
         "• Правильный ответ: +очки\n"
         "• Неправильный ответ: −очки\n"
-        "• После ошибки другие могут попробовать\n"
-        "• Правильно ответивший выбирает следующий вопрос\n"
-        "• После каждого раунда — таблица очков\n\n"
-        "⚖️ *Апелляция:*\n"
+        "• Если все спасовали — вопрос пропускается сразу\n\n"
+        "⚖️ *Апелляция (/appeal):*\n"
         "Если бот не засчитал верный по смыслу ответ,\n"
-        "игрок может написать /appeal — все проголосуют,\n"
-        "засчитывать ли его. Большинство ЗА — ответ принят.\n\n"
+        "напишите /appeal — все голосуют засчитывать ли.\n"
+        "Можно подать сразу после ошибки ИЛИ после\n"
+        "перехода к следующему вопросу (пока не выбран).\n\n"
         "⏱ *Таймауты:*\n"
         "На кнопку: {} сек\n"
         "На ответ: {} сек"
@@ -321,12 +285,10 @@ async def cmd_help(message: Message):
 async def cmd_newgame(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
-
     if manager.has_active_game(chat_id):
         await safe_send(chat_id, "⚠️ Уже идёт игра! /stop чтобы остановить.",
                         message.bot, thread_id)
         return
-
     pack = manager.get_pack(chat_id)
     if pack is None:
         await safe_send(
@@ -337,11 +299,9 @@ async def cmd_newgame(message: Message):
             message.bot, thread_id,
         )
         return
-
     game = manager.create_game(chat_id, pack)
     _apply_callbacks(game, message.bot, thread_id)
     game.start_lobby()
-
     await safe_send(
         chat_id,
         "🎮 *Новая игра!*\n"
@@ -358,17 +318,14 @@ async def cmd_join(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
     user = message.from_user
-
     game = manager.get_game(chat_id)
     if game is None or game.state != GameState.LOBBY:
         await safe_send(chat_id, "⚠️ Нет лобби. Используйте /newgame",
                         message.bot, thread_id)
         return
-
     display_name = user.first_name or "Player"
     if user.last_name:
         display_name += " {}".format(user.last_name)
-
     if game.add_player(user.id, user.username or "", display_name):
         players_list = '\n'.join(
             "  {}. {}".format(i + 1, p.display_name)
@@ -449,95 +406,69 @@ async def cmd_stop(message: Message):
 
 @router.message(Command("appeal"))
 async def cmd_appeal(message: Message):
-    """Игрок подаёт апелляцию на свой последний неправильный ответ."""
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
     user_id = message.from_user.id
-
     game = manager.get_game(chat_id)
     if game is None:
         await safe_send(chat_id, "ℹ️ Нет активной игры.", message.bot, thread_id)
         return
-
     if user_id not in game.players:
         await safe_send(chat_id, "⚠️ Вы не в игре! /join", message.bot, thread_id)
         return
-
     if game.current_appeal is not None:
         await safe_send(chat_id, "⚠️ Апелляция уже идёт!", message.bot, thread_id)
         return
-
-    if user_id not in game.failed_answerers:
+    # Проверяем наличие ошибочного ответа в текущем или последнем вопросе
+    in_current = user_id in game.failed_answerers
+    in_last = user_id in game.last_failed_answerers
+    if not in_current and not in_last:
         await safe_send(
             chat_id,
-            "ℹ️ Апеллировать можно только после ошибочного ответа на текущий вопрос.",
+            "ℹ️ Апеллировать можно только после ошибочного ответа на текущий вопрос "
+            "(или сразу после его завершения, пока не выбран следующий).",
             message.bot, thread_id,
         )
         return
-
     _apply_callbacks(game, message.bot, thread_id)
     success = await game.start_appeal(user_id, "")
     if not success:
-        await safe_send(
-            chat_id,
-            "⚠️ Сейчас нельзя подать апелляцию.",
-            message.bot, thread_id,
-        )
+        await safe_send(chat_id, "⚠️ Сейчас нельзя подать апелляцию.",
+                        message.bot, thread_id)
 
 
 @router.message(Command("listpacks"))
 async def cmd_listpacks(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
-
     logger.info("listpacks: PACKS_DIR = %s", PACKS_DIR)
-
     if not os.path.isdir(PACKS_DIR):
         await safe_send(
             chat_id,
             "📁 Папка packs/ не найдена по пути:\n{}\n\nСоздайте её и положите туда .siq файлы.".format(PACKS_DIR),
-            message.bot, thread_id,
-            parse_mode=None,
+            message.bot, thread_id, parse_mode=None,
         )
         return
-
     try:
         all_files = os.listdir(PACKS_DIR)
     except Exception as e:
-        logger.error("listpacks os.listdir error: %s", e)
         await safe_send(chat_id, "❌ Не удалось прочитать папку packs/: {}".format(e),
                         message.bot, thread_id, parse_mode=None)
         return
-
-    logger.info("listpacks: всего файлов в папке: %d", len(all_files))
-
     files = [f for f in all_files if f.lower().endswith('.siq')]
-    logger.info("listpacks: .siq файлов: %d", len(files))
-
     if not files:
         await safe_send(
             chat_id,
-            "📁 В папке packs/ нет .siq файлов.\n"
-            "Положите туда .siq файлы и используйте /loadpack <имя>",
-            message.bot, thread_id,
-            parse_mode=None,
+            "📁 В папке packs/ нет .siq файлов.\nПоложите туда .siq файлы и используйте /loadpack <имя>",
+            message.bot, thread_id, parse_mode=None,
         )
         return
-
     lines = ["📁 Доступные паки в packs/:\n"]
     for i, f in enumerate(sorted(files), 1):
         size_mb = os.path.getsize(os.path.join(PACKS_DIR, f)) / (1024 * 1024)
-        # Экранируем имя файла — не используем backtick чтобы избежать ошибок Markdown
         lines.append("{}. {} ({:.1f} МБ)".format(i, f, size_mb))
     lines.append("\n💡 Используйте /loadpack <имя_файла> для загрузки")
-
-    await safe_send(
-        chat_id,
-        "\n".join(lines),
-        message.bot,
-        thread_id,
-        parse_mode=None,   # plain text — имена файлов могут содержать спецсимволы
-    )
+    await safe_send(chat_id, "\n".join(lines), message.bot, thread_id, parse_mode=None)
 
 
 @router.message(Command("loadpack"))
@@ -574,11 +505,8 @@ async def cmd_loadpack(message: Message):
             return
         manager.store_pack(chat_id, pack)
         info = get_pack_info(pack)
-        await safe_send(
-            chat_id,
-            "✅ Пак загружен!\n\n{}\n\n/newgame — создать игру".format(info),
-            message.bot, thread_id, parse_mode=None,
-        )
+        await safe_send(chat_id, "✅ Пак загружен!\n\n{}\n\n/newgame — создать игру".format(info),
+                        message.bot, thread_id, parse_mode=None)
     except ValueError as e:
         await safe_send(chat_id, "❌ Ошибка парсинга: {}".format(e), message.bot, thread_id)
     except Exception as e:
@@ -625,11 +553,8 @@ async def handle_document(message: Message):
             return
         manager.store_pack(chat_id, pack)
         info = get_pack_info(pack)
-        await safe_send(
-            chat_id,
-            "✅ Пак загружен!\n\n{}\n\n/newgame — создать игру".format(info),
-            message.bot, thread_id, parse_mode=None,
-        )
+        await safe_send(chat_id, "✅ Пак загружен!\n\n{}\n\n/newgame — создать игру".format(info),
+                        message.bot, thread_id, parse_mode=None)
         logger.info("Pack saved: %s", file_path)
     except ValueError as e:
         await safe_send(chat_id, "❌ Ошибка парсинга: {}".format(e), message.bot, thread_id)
@@ -662,9 +587,34 @@ async def handle_callback(callback: CallbackQuery):
         if user_id in game.failed_answerers:
             await callback.answer("Вы уже ошиблись на этом вопросе", show_alert=True)
             return
+        if user_id in game.passed_players:
+            await callback.answer("Вы спасовали на этом вопросе", show_alert=True)
+            return
         _apply_callbacks(game, callback.message.bot, thread_id)
         success = await game.press_buzzer(user_id)
         await callback.answer("Вы отвечаете!" if success else "Кто-то уже отвечает")
+        return
+
+    # --- Пас ---
+    if data == "pass":
+        if game is None:
+            await callback.answer("Нет игры")
+            return
+        if user_id not in game.players:
+            await callback.answer("Вы не в игре! /join", show_alert=True)
+            return
+        if game.state != GameState.QUESTION_ASKED:
+            await callback.answer("Сейчас нельзя")
+            return
+        if user_id in game.passed_players:
+            await callback.answer("Вы уже спасовали", show_alert=True)
+            return
+        if user_id in game.failed_answerers:
+            await callback.answer("Вы уже ошиблись", show_alert=True)
+            return
+        _apply_callbacks(game, callback.message.bot, thread_id)
+        await game.press_pass(user_id)
+        await callback.answer("🙅 Пас принят")
         return
 
     # --- Апелляция: голосование ---
@@ -743,7 +693,6 @@ async def handle_text(message: Message):
     thread_id = get_thread_id(message)
     user_id = message.from_user.id
     text = message.text
-
     game = manager.get_game(chat_id)
     if game is None:
         return
@@ -751,7 +700,6 @@ async def handle_text(message: Message):
         return
     if user_id != game.current_answerer_id:
         return
-
     _apply_callbacks(game, message.bot, thread_id)
     await game.submit_answer(user_id, text)
 
@@ -762,17 +710,11 @@ async def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Укажите BOT_TOKEN в config.py!")
         return
-
     print("🚀 Запуск бота Своя Игра (aiogram)...")
     print("📁 Папка паков: {}".format(PACKS_DIR))
-
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
-    )
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = Dispatcher()
     dp.include_router(router)
-
     commands = [
         BotCommand(command="start", description="Начать / Помощь"),
         BotCommand(command="help", description="Правила игры"),
@@ -788,7 +730,6 @@ async def main():
         BotCommand(command="packinfo", description="Инфо о паке"),
     ]
     await bot.set_my_commands(commands)
-
     print("✅ Бот запущен!")
     await dp.start_polling(bot)
 

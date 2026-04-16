@@ -2,7 +2,7 @@
 Логика игры "Своя Игра" для Telegram.
 
 Управляет состоянием игры: раунды, выбор вопросов, ответы,
-подсчёт очков, таймауты, апелляции.
+подсчёт очков, таймауты, апелляции, пас.
 """
 
 import asyncio
@@ -52,8 +52,8 @@ class Appeal:
     user_id: int           # кто апеллирует
     answer_text: str       # текст ответа
     price: int             # стоимость вопроса
-    votes_for: set = field(default_factory=set)    # за принять
-    votes_against: set = field(default_factory=set) # против
+    votes_for: set = field(default_factory=set)
+    votes_against: set = field(default_factory=set)
     message_id: Optional[int] = None
 
 
@@ -68,36 +68,34 @@ class Game:
         self.pack: GamePack = pack
         self.state: GameState = GameState.IDLE
 
-        # Игроки: user_id -> Player
         self.players: Dict[int, Player] = {}
 
-        # Текущий раунд
         self.current_round_index: int = 0
         self.current_round: Optional[Round] = None
-
-        # Отслеживание отыгранных вопросов: (theme_index, question_index)
         self.played_questions: set = set()
 
-        # Текущий вопрос
         self.current_question: Optional[Question] = None
         self.current_theme_index: Optional[int] = None
         self.current_question_index: Optional[int] = None
 
-        # Кто выбирает вопрос (user_id)
         self.chooser_id: Optional[int] = None
 
-        # Ответы на текущий вопрос
         self.buzzer_queue: List[int] = []
         self.current_answerer_id: Optional[int] = None
         self.answer_attempts: List[AnswerAttempt] = []
-        self.failed_answerers: set = set()
+        self.failed_answerers: set = set()   # кто ошибся на ТЕКУЩЕМ вопросе
+        self.passed_players: set = set()     # кто пасанул на ТЕКУЩЕМ вопросе
         self.question_answered_correctly: bool = False
         self.correct_answerer_id: Optional[int] = None
+
+        # Сохраняем данные последнего вопроса для апелляции ПОСЛЕ его завершения
+        self.last_failed_answerers: set = set()
+        self.last_answer_attempts: List[AnswerAttempt] = []
+        self.last_question: Optional[Question] = None
 
         # Апелляция
         self.current_appeal: Optional[Appeal] = None
         self._appeal_task: Optional[asyncio.Task] = None
-        # Состояние ДО апелляции (чтобы вернуться если отклонена)
         self._state_before_appeal: Optional[GameState] = None
 
         # Таймеры
@@ -106,7 +104,7 @@ class Game:
         self._buzzer_task: Optional[asyncio.Task] = None
         self._answer_task: Optional[asyncio.Task] = None
 
-        # Callbacks (устанавливаются ботом)
+        # Callbacks
         self.send_callback = None
         self.send_photo_callback = None
         self.send_audio_callback = None
@@ -117,22 +115,18 @@ class Game:
         self.show_scores_callback = None
         self.announce_round_callback = None
         self.announce_game_over_callback = None
-        self.show_appeal_callback = None      # показывает кнопки голосования
-        self.remove_appeal_callback = None    # удаляет сообщение голосования
+        self.show_appeal_callback = None
+        self.remove_appeal_callback = None
 
-    # ==================== УПРАВЛЕНИЕ ИГРОКАМИ ====================
+    # ==================== ИГРОКИ ====================
 
     def add_player(self, user_id: int, username: str, display_name: str) -> bool:
         if self.state != GameState.LOBBY:
             return False
         if user_id in self.players:
             return False
-        self.players[user_id] = Player(
-            user_id=user_id,
-            username=username,
-            display_name=display_name,
-            score=0
-        )
+        self.players[user_id] = Player(user_id=user_id, username=username,
+                                       display_name=display_name, score=0)
         return True
 
     def remove_player(self, user_id: int) -> bool:
@@ -150,7 +144,7 @@ class Game:
     def get_player_count(self) -> int:
         return len(self.players)
 
-    # ==================== УПРАВЛЕНИЕ ИГРОЙ ====================
+    # ==================== ИГРА ====================
 
     def start_lobby(self):
         self.state = GameState.LOBBY
@@ -170,15 +164,12 @@ class Game:
         if self.current_round_index >= len(self.pack.rounds):
             await self._end_game()
             return
-
         self.current_round = self.pack.rounds[self.current_round_index]
         self.played_questions.clear()
         self.state = GameState.ROUND_START
         self.chooser_id = self._get_first_chooser()
-
         if self.announce_round_callback:
             await self.announce_round_callback(self)
-
         self.state = GameState.CHOOSING_QUESTION
         if self.show_board_callback:
             await self.show_board_callback(self)
@@ -197,7 +188,6 @@ class Game:
             return False
         if theme_idx < 0 or theme_idx >= len(self.current_round.themes):
             return False
-
         theme = self.current_round.themes[theme_idx]
         if question_idx < 0 or question_idx >= len(theme.questions):
             return False
@@ -213,6 +203,7 @@ class Game:
         self.current_answerer_id = None
         self.answer_attempts.clear()
         self.failed_answerers.clear()
+        self.passed_players.clear()
         self.question_answered_correctly = False
         self.correct_answerer_id = None
 
@@ -239,23 +230,14 @@ class Game:
             await self.send_callback(self, f"{header}\n\n{q_text}")
 
         if self.current_question.image and self.send_photo_callback:
-            await self.send_photo_callback(
-                self,
-                self.current_question.image,
-                self.current_question.image_filename
-            )
+            await self.send_photo_callback(self, self.current_question.image,
+                                           self.current_question.image_filename)
         if self.current_question.audio and self.send_audio_callback:
-            await self.send_audio_callback(
-                self,
-                self.current_question.audio,
-                self.current_question.audio_filename
-            )
+            await self.send_audio_callback(self, self.current_question.audio,
+                                           self.current_question.audio_filename)
         if self.current_question.video and self.send_video_callback:
-            await self.send_video_callback(
-                self,
-                self.current_question.video,
-                self.current_question.video_filename
-            )
+            await self.send_video_callback(self, self.current_question.video,
+                                           self.current_question.video_filename)
 
         if self.show_buzzer_callback:
             await self.show_buzzer_callback(self)
@@ -298,27 +280,48 @@ class Game:
             return False
         if user_id in self.failed_answerers:
             return False
+        if user_id in self.passed_players:
+            return False
         if user_id in self.buzzer_queue:
             return False
-
         self.buzzer_queue.append(user_id)
         if len(self.buzzer_queue) == 1:
             await self._give_answer_right(user_id)
             return True
         return False
 
+    async def press_pass(self, user_id: int) -> bool:
+        """Игрок пасует — пропускает вопрос без штрафа."""
+        if self.state != GameState.QUESTION_ASKED:
+            return False
+        if user_id not in self.players:
+            return False
+        if user_id in self.failed_answerers:
+            return False
+        if user_id in self.passed_players:
+            return False
+        self.passed_players.add(user_id)
+
+        # Если все живые игроки спасовали — сразу завершаем вопрос
+        active = [uid for uid in self.players
+                  if uid not in self.failed_answerers and uid not in self.passed_players]
+        if not active:
+            self._cancel_buzzer_timer()
+            if self.remove_buzzer_callback:
+                await self.remove_buzzer_callback(self)
+            await self._no_one_answered(skip_delay=True)
+        return True
+
     async def _give_answer_right(self, user_id: int):
         self._cancel_buzzer_timer()
         self.current_answerer_id = user_id
         self.state = GameState.WAITING_ANSWER
-
         player = self.players[user_id]
         if self.send_callback:
             await self.send_callback(
                 self,
                 f"⚡ *{player.display_name}* отвечает! ({self.answer_timeout:.0f} сек)"
             )
-
         self._cancel_answer_timer()
         self._answer_task = asyncio.create_task(self._answer_timeout_handler())
 
@@ -329,20 +332,12 @@ class Game:
             return None
         if self.question_answered_correctly:
             return None
-
         self._cancel_answer_timer()
-
-        attempt = AnswerAttempt(
-            user_id=user_id,
-            text=answer_text,
-            timestamp=time.time()
-        )
-
+        attempt = AnswerAttempt(user_id=user_id, text=answer_text, timestamp=time.time())
         is_correct = self._check_answer(answer_text, self.current_question.answer)
         attempt.is_correct = is_correct
         attempt.processed = True
         self.answer_attempts.append(attempt)
-
         if is_correct:
             await self._process_correct_answer(user_id)
             return True
@@ -354,7 +349,6 @@ class Game:
         user_clean = self._normalize(user_answer)
         if not user_clean:
             return False
-
         correct_variants = correct_answer.split('/')
         for variant in correct_variants:
             variant_clean = self._normalize(variant)
@@ -403,13 +397,10 @@ class Game:
     async def _process_correct_answer(self, user_id: int):
         self.question_answered_correctly = True
         self.correct_answerer_id = user_id
-
         player = self.players[user_id]
         price = self.current_question.price
         player.score += price
-
         self.state = GameState.SHOWING_ANSWER
-
         if self.send_callback:
             await self.send_callback(
                 self,
@@ -417,11 +408,9 @@ class Game:
                 f"💰 +{price} очков (всего: {player.score})\n\n"
                 f"📝 Правильный ответ: *{self.current_question.answer}*"
             )
-
         self.chooser_id = user_id
         if self.remove_buzzer_callback:
             await self.remove_buzzer_callback(self)
-
         await self._after_question()
 
     async def _process_wrong_answer(self, user_id: int):
@@ -429,27 +418,24 @@ class Game:
         price = self.current_question.price
         player.score -= price
         self.failed_answerers.add(user_id)
-
         if self.send_callback:
             await self.send_callback(
                 self,
                 f"❌ *{player.display_name}* отвечает неправильно!\n"
-                f"💸 -{price} очков (всего: {player.score})"
+                f"💸 -{price} очков (всего: {player.score})\n"
+                f"Можно подать /appeal если ответ верный по смыслу."
             )
-
         self.current_answerer_id = None
-
-        available_players = [p for p in self.players if p not in self.failed_answerers]
+        available_players = [p for p in self.players
+                             if p not in self.failed_answerers and p not in self.passed_players]
         if not available_players:
             await self._no_one_answered()
             return
-
         next_in_queue = None
         for uid in self.buzzer_queue:
-            if uid not in self.failed_answerers:
+            if uid not in self.failed_answerers and uid not in self.passed_players:
                 next_in_queue = uid
                 break
-
         if next_in_queue:
             await self._give_answer_right(next_in_queue)
         else:
@@ -459,7 +445,7 @@ class Game:
             self._cancel_buzzer_timer()
             self._buzzer_task = asyncio.create_task(self._buzzer_timeout_handler())
 
-    async def _no_one_answered(self):
+    async def _no_one_answered(self, skip_delay: bool = False):
         self.state = GameState.SHOWING_ANSWER
         if self.remove_buzzer_callback:
             await self.remove_buzzer_callback(self)
@@ -469,101 +455,122 @@ class Game:
                 f"⏰ Время вышло! Никто не ответил.\n\n"
                 f"📝 Правильный ответ: *{self.current_question.answer}*"
             )
-        await self._after_question()
+        # Сохраняем данные вопроса для возможной апелляции
+        self._save_last_question_data()
+        await self._after_question(skip_delay=skip_delay)
+
+    def _save_last_question_data(self):
+        """Сохраняем данные завершённого вопроса — нужны для апелляции после смены экрана."""
+        self.last_failed_answerers = set(self.failed_answerers)
+        self.last_answer_attempts = list(self.answer_attempts)
+        self.last_question = self.current_question
+
+    # ==================== ПАС ====================
+
+    # (логика в press_pass выше)
 
     # ==================== АПЕЛЛЯЦИЯ ====================
 
     async def start_appeal(self, user_id: int, answer_text: str) -> bool:
         """
-        Игрок подаёт апелляцию на свой последний (неправильный) ответ.
-        Возвращает True если апелляция запущена.
+        Подать апелляцию.
+        Разрешено из любого состояния после завершения вопроса, пока не начат следующий
+        вопрос. Проверяем last_failed_answerers если вопрос уже закончился.
         """
-        # Апеллировать можно только сразу после неверного ответа:
-        # состояние QUESTION_ASKED (ещё идёт вопрос) или SHOWING_ANSWER
-        if self.state not in (GameState.QUESTION_ASKED, GameState.SHOWING_ANSWER, GameState.WAITING_ANSWER):
+        if self.current_appeal is not None:
             return False
-
         if user_id not in self.players:
             return False
 
-        # Только тот, кто уже ошибся на этом вопросе, может апеллировать
-        if user_id not in self.failed_answerers:
+        # Определяем, из какого контекста апеллируем
+        active_question_states = (
+            GameState.QUESTION_ASKED,
+            GameState.WAITING_ANSWER,
+            GameState.SHOWING_ANSWER,
+        )
+        # Апелляция после того как вопрос уже закрыт (показывается доска)
+        post_question_states = (
+            GameState.CHOOSING_QUESTION,
+        )
+
+        if self.state in active_question_states:
+            # Вопрос ещё "активен" — проверяем текущие данные
+            if user_id not in self.failed_answerers:
+                return False
+            last_attempt = None
+            for att in reversed(self.answer_attempts):
+                if att.user_id == user_id and not att.is_correct:
+                    last_attempt = att
+                    break
+            if last_attempt is None:
+                return False
+            question = self.current_question
+            self._cancel_buzzer_timer()
+            self._cancel_answer_timer()
+            self._state_before_appeal = self.state
+            restore_to_active = True
+
+        elif self.state in post_question_states:
+            # Вопрос уже закончился, но апелляцию ещё можно подать
+            if user_id not in self.last_failed_answerers:
+                return False
+            last_attempt = None
+            for att in reversed(self.last_answer_attempts):
+                if att.user_id == user_id and not att.is_correct:
+                    last_attempt = att
+                    break
+            if last_attempt is None:
+                return False
+            question = self.last_question
+            self._state_before_appeal = self.state
+            restore_to_active = False
+        else:
             return False
-
-        # Нельзя апеллировать повторно
-        if self.current_appeal is not None:
-            return False
-
-        # Берём текст последнего ответа этого игрока
-        last_attempt = None
-        for att in reversed(self.answer_attempts):
-            if att.user_id == user_id and not att.is_correct:
-                last_attempt = att
-                break
-
-        if last_attempt is None:
-            return False
-
-        self._cancel_buzzer_timer()
-        self._cancel_answer_timer()
 
         self.current_appeal = Appeal(
             user_id=user_id,
             answer_text=last_attempt.text,
-            price=self.current_question.price,
+            price=question.price,
         )
-        self._state_before_appeal = self.state
+        # Сохраняем вопрос для выплаты очков при принятии
+        self._appeal_question = question
+        self._appeal_restore_active = restore_to_active
         self.state = GameState.APPEAL
 
         player = self.players[user_id]
         if self.send_callback:
             await self.send_callback(
                 self,
-                f"⚖️ *{player.display_name}* подаёт апелляцию!*\n"
+                f"⚖️ *{player.display_name}* подаёт апелляцию!\n"
                 f"Ответ: _{last_attempt.text}_\n"
-                f"Правильный ответ по паку: *{self.current_question.answer}*\n\n"
+                f"Правильный ответ по паку: *{question.answer}*\n\n"
                 f"Голосуйте! Засчитать ответ? ({APPEAL_TIMEOUT} сек)"
             )
-
         if self.show_appeal_callback:
             await self.show_appeal_callback(self)
-
         self._cancel_appeal_timer()
         self._appeal_task = asyncio.create_task(self._appeal_timeout_handler())
         return True
 
     async def vote_appeal(self, user_id: int, vote: bool) -> Optional[str]:
-        """
-        Игрок голосует по апелляции.
-        vote=True — за принять, vote=False — против.
-        Возвращает статус: 'voted', 'already_voted', 'no_appeal', 'not_player'.
-        """
         if self.state != GameState.APPEAL or self.current_appeal is None:
             return 'no_appeal'
         if user_id not in self.players:
             return 'not_player'
-
         appeal = self.current_appeal
-        # Убираем из обоих на случай смены голоса
         appeal.votes_for.discard(user_id)
         appeal.votes_against.discard(user_id)
-
         if vote:
             appeal.votes_for.add(user_id)
         else:
             appeal.votes_against.add(user_id)
-
-        # Обновляем счётчик в сообщении голосования
         if self.show_appeal_callback:
             await self.show_appeal_callback(self)
-
-        # Проверяем: все проголосовали?
         total = len(self.players)
         voted = len(appeal.votes_for) + len(appeal.votes_against)
         if voted >= total:
             self._cancel_appeal_timer()
             await self._resolve_appeal()
-
         return 'voted'
 
     async def _appeal_timeout_handler(self):
@@ -575,16 +582,16 @@ class Game:
             pass
 
     async def _resolve_appeal(self):
-        """Подводит итоги апелляции."""
         if self.state != GameState.APPEAL or self.current_appeal is None:
             return
 
         appeal = self.current_appeal
+        question = getattr(self, '_appeal_question', self.current_question)
+        restore_active = getattr(self, '_appeal_restore_active', False)
+
         for_votes = len(appeal.votes_for)
         against_votes = len(appeal.votes_against)
         total_voted = for_votes + against_votes
-
-        # Большинство ЗА (или ничья — в пользу апеллирующего)
         accepted = for_votes >= against_votes and total_voted > 0
 
         if self.remove_appeal_callback:
@@ -594,12 +601,10 @@ class Game:
         price = appeal.price
 
         if accepted and player:
-            # Отменяем штраф и засчитываем ответ
             player.score += price * 2  # компенсируем -price и добавляем +price
             self.question_answered_correctly = True
             self.correct_answerer_id = appeal.user_id
             self.chooser_id = appeal.user_id
-
             if self.send_callback:
                 await self.send_callback(
                     self,
@@ -608,49 +613,49 @@ class Game:
                     f"Итого: {player.score}"
                 )
         else:
-            if total_voted == 0:
-                result_text = "никто не проголосовал"
-            else:
-                result_text = f"{for_votes} ЗА / {against_votes} ПРОТИВ"
-
+            result_text = "никто не проголосовал" if total_voted == 0 else f"{for_votes} ЗА / {against_votes} ПРОТИВ"
             if self.send_callback:
-                await self.send_callback(
-                    self,
-                    f"❌ Апелляция отклонена ({result_text})."
-                )
+                await self.send_callback(self, f"❌ Апелляция отклонена ({result_text}).")
 
         self.current_appeal = None
         prev_state = self._state_before_appeal
         self._state_before_appeal = None
+        self._appeal_question = None
+        self._appeal_restore_active = None
 
-        # Продолжаем игру
-        if accepted or self.question_answered_correctly:
+        if accepted:
+            # Сбрасываем last_failed чтобы нельзя было апеллировать повторно
+            self.last_failed_answerers = set()
             self.state = GameState.SHOWING_ANSWER
             await self._after_question()
-        else:
-            # Возвращаемся туда, откуда пришли
-            if prev_state == GameState.SHOWING_ANSWER:
+        elif prev_state == GameState.CHOOSING_QUESTION:
+            # Вопрос уже был закрыт — просто возвращаемся на доску
+            self.last_failed_answerers = set()  # апелляция исчерпана
+            self.state = GameState.CHOOSING_QUESTION
+            if self.show_board_callback:
+                await self.show_board_callback(self)
+        elif restore_active:
+            # Вопрос ещё шёл — восстанавливаем
+            available = [p for p in self.players
+                         if p not in self.failed_answerers and p not in self.passed_players]
+            if not available:
                 self.state = GameState.SHOWING_ANSWER
                 await self._after_question()
-            elif prev_state in (GameState.QUESTION_ASKED, GameState.WAITING_ANSWER):
-                # Восстанавливаем вопрос
-                available = [p for p in self.players if p not in self.failed_answerers]
-                if not available:
-                    await self._no_one_answered()
-                else:
-                    self.state = GameState.QUESTION_ASKED
-                    if self.show_buzzer_callback:
-                        await self.show_buzzer_callback(self)
-                    self._cancel_buzzer_timer()
-                    self._buzzer_task = asyncio.create_task(self._buzzer_timeout_handler())
             else:
-                self.state = GameState.SHOWING_ANSWER
-                await self._after_question()
+                self.state = GameState.QUESTION_ASKED
+                if self.show_buzzer_callback:
+                    await self.show_buzzer_callback(self)
+                self._cancel_buzzer_timer()
+                self._buzzer_task = asyncio.create_task(self._buzzer_timeout_handler())
+        else:
+            self.state = GameState.SHOWING_ANSWER
+            await self._after_question()
 
     # ==================== ПОСЛЕ ВОПРОСА ====================
 
-    async def _after_question(self):
-        await asyncio.sleep(2)
+    async def _after_question(self, skip_delay: bool = False):
+        if not skip_delay:
+            await asyncio.sleep(2)
         if self._is_round_complete():
             await self._end_round()
         else:
@@ -687,11 +692,7 @@ class Game:
             return []
         board = []
         for t_idx, theme in enumerate(self.current_round.themes):
-            theme_data = {
-                'theme_idx': t_idx,
-                'theme_name': theme.name,
-                'questions': []
-            }
+            theme_data = {'theme_idx': t_idx, 'theme_name': theme.name, 'questions': []}
             for q_idx, question in enumerate(theme.questions):
                 theme_data['questions'].append({
                     'q_idx': q_idx,
@@ -755,7 +756,6 @@ class Game:
         return available
 
     def get_appeal_status_text(self) -> str:
-        """Текст для сообщения голосования по апелляции."""
         if self.current_appeal is None:
             return ""
         a = self.current_appeal
@@ -793,10 +793,14 @@ class Game:
         self.current_answerer_id = None
         self.answer_attempts.clear()
         self.failed_answerers.clear()
+        self.passed_players.clear()
         self.question_answered_correctly = False
         self.correct_answerer_id = None
         self.current_appeal = None
         self._state_before_appeal = None
+        self.last_failed_answerers = set()
+        self.last_answer_attempts = []
+        self.last_question = None
 
 
 class GameManager:
