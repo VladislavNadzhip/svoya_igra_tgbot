@@ -274,7 +274,13 @@ class Game:
             self._appeal_task.cancel()
 
     async def press_buzzer(self, user_id: int) -> bool:
-        if self.state != GameState.QUESTION_ASKED:
+        """
+        Игрок нажимает кнопку базера.
+        Разрешено в QUESTION_ASKED и WAITING_ANSWER — в последнем случае
+        игрок встаёт в очередь, чтобы ответить следующим.
+        """
+        # Разрешаем нажать базер как в QUESTION_ASKED, так и во время WAITING_ANSWER
+        if self.state not in (GameState.QUESTION_ASKED, GameState.WAITING_ANSWER):
             return False
         if user_id not in self.players:
             return False
@@ -284,10 +290,15 @@ class Game:
             return False
         if user_id in self.buzzer_queue:
             return False
+        # Нельзя встать в очередь если уже отвечаешь сам
+        if user_id == self.current_answerer_id:
+            return False
         self.buzzer_queue.append(user_id)
-        if len(self.buzzer_queue) == 1:
+        # Если сейчас никто не отвечает — сразу даём право ответа
+        if self.state == GameState.QUESTION_ASKED and len(self.buzzer_queue) == 1:
             await self._give_answer_right(user_id)
             return True
+        # Иначе — встал в очередь, будет отвечать после текущего
         return False
 
     async def press_pass(self, user_id: int) -> bool:
@@ -418,6 +429,7 @@ class Game:
         price = self.current_question.price
         player.score -= price
         self.failed_answerers.add(user_id)
+        self.current_answerer_id = None
         if self.send_callback:
             await self.send_callback(
                 self,
@@ -425,12 +437,12 @@ class Game:
                 f"💸 -{price} очков (всего: {player.score})\n"
                 f"Можно подать /appeal если ответ верный по смыслу."
             )
-        self.current_answerer_id = None
         available_players = [p for p in self.players
                              if p not in self.failed_answerers and p not in self.passed_players]
         if not available_players:
             await self._no_one_answered()
             return
+        # Ищем следующего в очереди (uже нажавших раньше)
         next_in_queue = None
         for uid in self.buzzer_queue:
             if uid not in self.failed_answerers and uid not in self.passed_players:
@@ -439,6 +451,10 @@ class Game:
         if next_in_queue:
             await self._give_answer_right(next_in_queue)
         else:
+            # Очередь пуста — показываем кнопку заново
+            # Удаляем старую кнопку перед отправкой новой
+            if self.remove_buzzer_callback:
+                await self.remove_buzzer_callback(self)
             self.state = GameState.QUESTION_ASKED
             if self.show_buzzer_callback:
                 await self.show_buzzer_callback(self)
@@ -455,7 +471,6 @@ class Game:
                 f"⏰ Время вышло! Никто не ответил.\n\n"
                 f"📝 Правильный ответ: *{self.current_question.answer}*"
             )
-        # Сохраняем данные вопроса для возможной апелляции
         self._save_last_question_data()
         await self._after_question(skip_delay=skip_delay)
 
@@ -475,26 +490,23 @@ class Game:
         """
         Подать апелляцию.
         Разрешено из любого состояния после завершения вопроса, пока не начат следующий
-        вопрос. Проверяем last_failed_answerers если вопрос уже закончился.
+        вопрос. Проверяем last_failed_answerers если вопрос уже закрыт.
         """
         if self.current_appeal is not None:
             return False
         if user_id not in self.players:
             return False
 
-        # Определяем, из какого контекста апеллируем
         active_question_states = (
             GameState.QUESTION_ASKED,
             GameState.WAITING_ANSWER,
             GameState.SHOWING_ANSWER,
         )
-        # Апелляция после того как вопрос уже закрыт (показывается доска)
         post_question_states = (
             GameState.CHOOSING_QUESTION,
         )
 
         if self.state in active_question_states:
-            # Вопрос ещё "активен" — проверяем текущие данные
             if user_id not in self.failed_answerers:
                 return False
             last_attempt = None
@@ -511,7 +523,6 @@ class Game:
             restore_to_active = True
 
         elif self.state in post_question_states:
-            # Вопрос уже закончился, но апелляцию ещё можно подать
             if user_id not in self.last_failed_answerers:
                 return False
             last_attempt = None
@@ -532,7 +543,6 @@ class Game:
             answer_text=last_attempt.text,
             price=question.price,
         )
-        # Сохраняем вопрос для выплаты очков при принятии
         self._appeal_question = question
         self._appeal_restore_active = restore_to_active
         self.state = GameState.APPEAL
@@ -601,7 +611,7 @@ class Game:
         price = appeal.price
 
         if accepted and player:
-            player.score += price * 2  # компенсируем -price и добавляем +price
+            player.score += price * 2
             self.question_answered_correctly = True
             self.correct_answerer_id = appeal.user_id
             self.chooser_id = appeal.user_id
@@ -624,24 +634,23 @@ class Game:
         self._appeal_restore_active = None
 
         if accepted:
-            # Сбрасываем last_failed чтобы нельзя было апеллировать повторно
             self.last_failed_answerers = set()
             self.state = GameState.SHOWING_ANSWER
             await self._after_question()
         elif prev_state == GameState.CHOOSING_QUESTION:
-            # Вопрос уже был закрыт — просто возвращаемся на доску
-            self.last_failed_answerers = set()  # апелляция исчерпана
+            self.last_failed_answerers = set()
             self.state = GameState.CHOOSING_QUESTION
             if self.show_board_callback:
                 await self.show_board_callback(self)
         elif restore_active:
-            # Вопрос ещё шёл — восстанавливаем
             available = [p for p in self.players
                          if p not in self.failed_answerers and p not in self.passed_players]
             if not available:
                 self.state = GameState.SHOWING_ANSWER
                 await self._after_question()
             else:
+                if self.remove_buzzer_callback:
+                    await self.remove_buzzer_callback(self)
                 self.state = GameState.QUESTION_ASKED
                 if self.show_buzzer_callback:
                     await self.show_buzzer_callback(self)
