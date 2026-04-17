@@ -1249,14 +1249,19 @@ async def handle_callback(callback: CallbackQuery):
 
 # ==================== ТЕКСТОВЫЕ СООБЩЕНИЯ ====================
 
-@router.message(F.text & ~F.text.startswith("/"))
+@router.message(F.text)
 async def handle_text(message: Message):
+    # Пропускаем команды — они обрабатываются своими хендлерами
     if message.text is None or message.text.startswith('/'):
         return
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
-    user_id = message.from_user.id
-    text = message.text
+    user_id = message.from_user.id if message.from_user else None
+    if user_id is None:
+        return
+    text = message.text.strip()
+    if not text:
+        return
     game = manager.get_game(chat_id)
     if game is None:
         return
