@@ -3,7 +3,7 @@
 
 Управляет состоянием игры: раунды, выбор вопросов, ответы,
 подсчёт очков, таймауты, апелляции, пас, режим ведущего,
-голосование за скип раунда/темы.
+голосование за скип.
 """
 
 import asyncio
@@ -520,21 +520,26 @@ class Game:
         elif self.state in post_question_states:
             if user_id not in self.last_failed_answerers:
                 return False
+            if self.last_question is None:
+                return False
+            question = self.last_question
+            # Ищем последнюю попытку игрока (может отсутствовать при таймауте)
             last_attempt = None
             for att in reversed(self.last_answer_attempts):
                 if att.user_id == user_id and not att.is_correct:
                     last_attempt = att
                     break
-            if last_attempt is None:
-                return False
-            question = self.last_question
             self._state_before_appeal = self.state
             restore_to_active = False
         else:
             return False
+
+        # Текст ответа для апелляции: из попытки или из переданного answer_text
+        appeal_answer_text = last_attempt.text if last_attempt else (answer_text or "—")
+
         self.current_appeal = Appeal(
             user_id=user_id,
-            answer_text=last_attempt.text,
+            answer_text=appeal_answer_text,
             price=question.price,
         )
         self._appeal_question = question
@@ -545,7 +550,7 @@ class Game:
             await self.send_callback(
                 self,
                 f"⚖️ *{player.display_name}* подаёт апелляцию!\n"
-                f"Ответ: _{last_attempt.text}_\n"
+                f"Ответ: _{appeal_answer_text}_\n"
                 f"Правильный ответ по паку: *{question.answer}*\n\n"
                 f"Голосуйте! Засчитать ответ? ({APPEAL_TIMEOUT} сек)"
             )
