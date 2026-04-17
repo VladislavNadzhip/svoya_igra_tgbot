@@ -90,18 +90,11 @@ def _build_zip_index(zf: zipfile.ZipFile) -> Dict[str, str]:
             index[key] = value
 
     for zip_name in zf.namelist():
-        # Сырое имя
         _add(zip_name.lower(), zip_name)
-
-        # URL-decoded полный путь
         decoded_full = urllib.parse.unquote(zip_name).lower()
         _add(decoded_full, zip_name)
-
-        # basename (raw)
         base_raw = os.path.basename(zip_name).lower()
         _add(base_raw, zip_name)
-
-        # basename (decoded)
         base_dec = urllib.parse.unquote(base_raw)
         _add(base_dec, zip_name)
 
@@ -109,7 +102,7 @@ def _build_zip_index(zf: zipfile.ZipFile) -> Dict[str, str]:
 
 
 def _normalize_resource(name: str) -> str:
-    """Снимает ледящие @ и / из имени ресурса."""
+    """Снимает лидирующие @ и / из имени ресурса."""
     return name.lstrip('@').lstrip('/')
 
 
@@ -119,10 +112,6 @@ def _read_media_from_zip(
     resource_name: str,
     folder: str
 ) -> Tuple[Optional[bytes], Optional[str]]:
-    """
-    Находит и читает медиафайл напрямую из ZIP.
-    resource_name может начинаться с @ — он будет срезан.
-    """
     clean = _normalize_resource(resource_name)
     decoded = urllib.parse.unquote(clean)
     base = os.path.basename(decoded)
@@ -258,30 +247,52 @@ def _parse_theme(theme_el, ns: str, zf: zipfile.ZipFile, zip_index: Dict[str, st
 def _get_element_text(el) -> str:
     """
     Извлекает весь текст из элемента, включая вложенные теги (itertext).
-    Это важно для атомов/шагов с вложенными тегами или CDATA.
     """
     return ''.join(el.itertext()).strip()
 
 
 def _is_resource_name(text: str) -> bool:
     """
-    Определяет, является ли текст именем ресурса (ссылкой на медиафайл),
-    а не текстом вопроса.
-    Ресурс: начинается с '@' ИЛИ содержит расширение медиафайла.
+    Определяет, является ли текст именем ресурса (ссылкой на медиафайл).
+    Ресурс: начинается с '@' ИЛИ содержит расширение медиафайла без пробелов.
     """
     if text.startswith('@'):
         return True
-    # Проверяем расширение файла
     lower = text.lower()
     media_exts = (
-        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',  # изображения
-        '.mp3', '.ogg', '.wav', '.flac', '.m4a',           # аудио
-        '.mp4', '.avi', '.mkv', '.mov', '.webm',           # видео
+        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+        '.mp3', '.ogg', '.wav', '.flac', '.m4a',
+        '.mp4', '.avi', '.mkv', '.mov', '.webm',
     )
-    # Считаем ресурсом только если текст похож на имя файла (нет пробелов, есть расширение)
     if ' ' not in text and any(lower.endswith(ext) for ext in media_exts):
         return True
     return False
+
+
+def _load_media_by_ext(
+    data: bytes,
+    fname: str,
+    image_data, image_filename,
+    audio_data, audio_filename,
+    video_data, video_filename,
+):
+    """Определяет тип медиа по расширению и заполняет соответствующие поля."""
+    ext = fname.lower().rsplit('.', 1)[-1] if fname and '.' in fname else ''
+    if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp') and image_data is None:
+        return data, fname, audio_data, audio_filename, video_data, video_filename
+    elif ext in ('mp3', 'ogg', 'wav', 'flac', 'm4a') and audio_data is None:
+        return image_data, image_filename, data, fname, video_data, video_filename
+    elif ext in ('mp4', 'avi', 'mkv', 'mov', 'webm') and video_data is None:
+        return image_data, image_filename, audio_data, audio_filename, data, fname
+    return image_data, image_filename, audio_data, audio_filename, video_data, video_filename
+
+
+# Типы атомов, которые несут медиаконтент (не текст)
+_MEDIA_ATOM_TYPES = {'image', 'voice', 'audio', 'video'}
+# Типы атомов, которые несут текст вопроса
+_TEXT_ATOM_TYPES = {'', 'text', 'say'}
+# Типы атомов, которые нужно полностью игнорировать
+_SKIP_ATOM_TYPES = {'marker'}
 
 
 def _parse_question(
@@ -318,26 +329,30 @@ def _parse_question(
         for atom_el in scenario_el.findall('{0}atom'.format(ns)):
             atom_type = atom_el.attrib.get('type', '').lower()
 
-            # Используем itertext() чтобы захватить текст из вложенных тегов тоже
+            # Пропускаем маркеры и паузы (атомы без контента)
+            if atom_type in _SKIP_ATOM_TYPES:
+                continue
+
             atom_text_raw = _get_element_text(atom_el)
 
-            if atom_type in ('', 'text', 'say'):
+            if atom_type in _TEXT_ATOM_TYPES:
+                # Явно текстовый атом (type="", "text", "say")
                 if not atom_text_raw:
                     continue
-                # Проверяем: если текст выглядит как имя ресурса — пробуем загрузить как медиа
                 if _is_resource_name(atom_text_raw):
+                    # Выглядит как ссылка на ресурс — пробуем загрузить
                     resource = _normalize_resource(atom_text_raw)
                     data, fname = _try_all_folders(zf, zip_index, resource)
                     if data:
-                        ext = fname.lower().rsplit('.', 1)[-1] if fname and '.' in fname else ''
-                        if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp') and image_data is None:
-                            image_data, image_filename = data, fname
-                        elif ext in ('mp3', 'ogg', 'wav', 'flac', 'm4a') and audio_data is None:
-                            audio_data, audio_filename = data, fname
-                        elif ext in ('mp4', 'avi', 'mkv', 'mov', 'webm') and video_data is None:
-                            video_data, video_filename = data, fname
+                        image_data, image_filename, audio_data, audio_filename, \
+                            video_data, video_filename = _load_media_by_ext(
+                                data, fname,
+                                image_data, image_filename,
+                                audio_data, audio_filename,
+                                video_data, video_filename,
+                            )
                     else:
-                        # Не нашли ресурс — трактуем как текст (убираем @ если есть)
+                        # Ресурс не найден — показываем как текст (убираем @)
                         clean = _normalize_resource(atom_text_raw)
                         question_text = _append_text(question_text, clean)
                 else:
@@ -370,6 +385,11 @@ def _parse_question(
                     if video_data is None:
                         video_data, video_filename = _try_all_folders(zf, zip_index, resource)
 
+            else:
+                # Неизвестный тип атома — пробуем трактовать как текст
+                if atom_text_raw and not _is_resource_name(atom_text_raw):
+                    question_text = _append_text(question_text, atom_text_raw)
+
     # ===== Новый формат: <body><step> =====
     body_el = question_el.find('{0}body'.format(ns))
     if body_el is not None:
@@ -378,29 +398,66 @@ def _parse_question(
             if tag != 'step':
                 continue
 
-            # Используем itertext() — захватывает текст в т.ч. из вложенных тегов
+            step_type = step_el.attrib.get('type', '').lower()
+
+            # Пропускаем маркеры
+            if step_type in _SKIP_ATOM_TYPES:
+                continue
+
             step_text = _get_element_text(step_el)
 
             if not step_text:
                 continue
 
             if step_text.startswith('@'):
-                resource_name = step_text[1:]  # срезаем @
+                # Явная ссылка на ресурс
+                resource_name = step_text[1:]
                 data, fname = _try_all_folders(zf, zip_index, resource_name)
                 if data:
-                    ext = fname.lower().rsplit('.', 1)[-1] if fname and '.' in fname else ''
-                    if ext in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp') and image_data is None:
-                        image_data, image_filename = data, fname
-                    elif ext in ('mp3', 'ogg', 'wav', 'flac', 'm4a') and audio_data is None:
-                        audio_data, audio_filename = data, fname
-                    elif ext in ('mp4', 'avi', 'mkv', 'mov', 'webm') and video_data is None:
-                        video_data, video_filename = data, fname
-                    elif image_data is None:
+                    image_data, image_filename, audio_data, audio_filename, \
+                        video_data, video_filename = _load_media_by_ext(
+                            data, fname,
+                            image_data, image_filename,
+                            audio_data, audio_filename,
+                            video_data, video_filename,
+                        )
+                    if image_data is None and audio_data is None and video_data is None:
+                        # Не определили тип — кладём в image
                         image_data, image_filename = data, fname
                 else:
-                    # Ресурс не найден — показываем текст как есть (без @)
+                    # Ресурс не найден — показываем как текст
                     question_text = _append_text(question_text, resource_name)
+
+            elif step_type in _MEDIA_ATOM_TYPES:
+                # Явно медийный step с именем ресурса без @
+                resource_name = _normalize_resource(step_text)
+                data, fname = _try_all_folders(zf, zip_index, resource_name)
+                if data:
+                    image_data, image_filename, audio_data, audio_filename, \
+                        video_data, video_filename = _load_media_by_ext(
+                            data, fname,
+                            image_data, image_filename,
+                            audio_data, audio_filename,
+                            video_data, video_filename,
+                        )
+
+            elif _is_resource_name(step_text):
+                # Похоже на имя файла без @
+                resource_name = _normalize_resource(step_text)
+                data, fname = _try_all_folders(zf, zip_index, resource_name)
+                if data:
+                    image_data, image_filename, audio_data, audio_filename, \
+                        video_data, video_filename = _load_media_by_ext(
+                            data, fname,
+                            image_data, image_filename,
+                            audio_data, audio_filename,
+                            video_data, video_filename,
+                        )
+                else:
+                    question_text = _append_text(question_text, step_text)
+
             else:
+                # Обычный текст
                 question_text = _append_text(question_text, step_text)
 
     answer_text = _parse_answer(question_el, ns)
