@@ -1,6 +1,7 @@
 """
 Telegram-бот "Своя Игра" на aiogram 3.x.
-Поддерживает темы (topics), апелляции, маскировку аудио, пас.
+Поддерживает темы (topics), апелляции, маскировку аудио, пас,
+пагинатор паков с inline-кнопками.
 """
 
 import os
@@ -36,6 +37,8 @@ appeal_messages: dict = {}
 PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs")
 os.makedirs(PACKS_DIR, exist_ok=True)
 
+PACKS_PAGE_SIZE = 8  # паков на одной странице
+
 router = Router()
 
 
@@ -64,6 +67,69 @@ async def safe_send(chat_id: int, text: str, bot: Bot,
         except Exception as e2:
             logger.error("Send error (plain): %s", e2)
             return None
+
+
+# ==================== ПАГИНАТОР ПАКОВ ====================
+
+def _get_siq_files() -> list[str]:
+    """Возвращает отсортированный список .siq файлов из PACKS_DIR."""
+    if not os.path.isdir(PACKS_DIR):
+        return []
+    try:
+        files = [f for f in os.listdir(PACKS_DIR) if f.lower().endswith('.siq')]
+        return sorted(files)
+    except Exception:
+        return []
+
+
+def _build_packs_keyboard(page: int, files: list[str]) -> InlineKeyboardMarkup:
+    """Строит inline-клавиатуру со списком паков и кнопками пагинации."""
+    total = len(files)
+    total_pages = max(1, (total + PACKS_PAGE_SIZE - 1) // PACKS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PACKS_PAGE_SIZE
+    end = start + PACKS_PAGE_SIZE
+    page_files = files[start:end]
+
+    rows = []
+    for i, fname in enumerate(page_files):
+        global_idx = start + i
+        size_mb = 0.0
+        try:
+            size_mb = os.path.getsize(os.path.join(PACKS_DIR, fname)) / (1024 * 1024)
+        except Exception:
+            pass
+        label = fname
+        if fname.lower().endswith('.siq'):
+            label = fname[:-4]  # убираем расширение для красоты
+        label = label[:40] + "…" if len(label) > 40 else label
+        btn_text = "📦 {} ({:.1f} МБ)".format(label, size_mb)
+        rows.append([InlineKeyboardButton(
+            text=btn_text,
+            callback_data="loadpack_idx_{}".format(global_idx)
+        )])
+
+    # Кнопки навигации
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data="packs_page_{}".format(page - 1)))
+    nav.append(InlineKeyboardButton(text="{}/{}".format(page + 1, total_pages), callback_data="packs_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data="packs_page_{}".format(page + 1)))
+    if nav:
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _packs_text(page: int, files: list[str]) -> str:
+    total = len(files)
+    total_pages = max(1, (total + PACKS_PAGE_SIZE - 1) // PACKS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    return "📁 *Доступные паки* (всего: {}, стр. {}/{}):\n\nНажмите на пак чтобы загрузить его:".format(
+        total, page + 1, total_pages
+    )
 
 
 # ==================== CALLBACKS ДЛЯ GAME ====================
@@ -239,7 +305,7 @@ async def cmd_start(message: Message):
     text = (
         "🎮 *Своя Игра — Telegram Bot*\n\n"
         "📦 *Как начать:*\n"
-        "1. Отправьте .siq файл в этот чат ИЛИ положите в папку packs/\n"
+        "1. Отправьте .siq файл в этот чат ИЛИ используйте /listpacks\n"
         "2. /newgame — создать игру\n"
         "3. /join — присоединиться\n"
         "4. /startgame — начать!\n\n"
@@ -250,9 +316,8 @@ async def cmd_start(message: Message):
         "/startgame — начать\n"
         "/scores — счёт\n"
         "/stop — остановить\n"
-        "/listpacks — список локальных паков\n"
-        "/loadpack — загрузить пак из packs/\n"
-        "/packinfo — инфо о паке\n"
+        "/listpacks — список паков (с кнопками загрузки)\n"
+        "/packinfo — инфо о текущем паке\n"
         "/help — помощь"
     )
     await safe_send(message.chat.id, text, message.bot, get_thread_id(message))
@@ -272,9 +337,7 @@ async def cmd_help(message: Message):
         "• Если все спасовали — вопрос пропускается сразу\n\n"
         "⚖️ *Апелляция (/appeal):*\n"
         "Если бот не засчитал верный по смыслу ответ,\n"
-        "напишите /appeal — все голосуют засчитывать ли.\n"
-        "Можно подать сразу после ошибки ИЛИ после\n"
-        "перехода к следующему вопросу (пока не выбран).\n\n"
+        "напишите /appeal — все голосуют засчитывать ли.\n\n"
         "⏱ *Таймауты:*\n"
         "На кнопку: {} сек\n"
         "На ответ: {} сек"
@@ -292,13 +355,20 @@ async def cmd_newgame(message: Message):
         return
     pack = manager.get_pack(chat_id)
     if pack is None:
-        await safe_send(
-            chat_id,
-            "📦 Сначала загрузите пак!\n"
-            "Отправьте .siq файл в этот чат ИЛИ используйте /loadpack\n\n"
-            "Создать пак: vladimirkhil.com/si/siquester",
-            message.bot, thread_id,
-        )
+        files = _get_siq_files()
+        if files:
+            keyboard = _build_packs_keyboard(0, files)
+            await safe_send(chat_id,
+                            "📦 Сначала выберите пак:",
+                            message.bot, thread_id, reply_markup=keyboard)
+        else:
+            await safe_send(
+                chat_id,
+                "📦 Сначала загрузите пак!\n"
+                "Отправьте .siq файл в этот чат.\n\n"
+                "Создать пак: vladimirkhil.com/si/siquester",
+                message.bot, thread_id,
+            )
         return
     game = manager.create_game(chat_id, pack)
     _apply_callbacks(game, message.bot, thread_id)
@@ -441,77 +511,18 @@ async def cmd_appeal(message: Message):
 async def cmd_listpacks(message: Message):
     chat_id = message.chat.id
     thread_id = get_thread_id(message)
-    logger.info("listpacks: PACKS_DIR = %s", PACKS_DIR)
-    if not os.path.isdir(PACKS_DIR):
-        await safe_send(
-            chat_id,
-            "📁 Папка packs/ не найдена по пути:\n{}\n\nСоздайте её и положите туда .siq файлы.".format(PACKS_DIR),
-            message.bot, thread_id, parse_mode=None,
-        )
-        return
-    try:
-        all_files = os.listdir(PACKS_DIR)
-    except Exception as e:
-        await safe_send(chat_id, "❌ Не удалось прочитать папку packs/: {}".format(e),
-                        message.bot, thread_id, parse_mode=None)
-        return
-    files = [f for f in all_files if f.lower().endswith('.siq')]
+    files = _get_siq_files()
     if not files:
         await safe_send(
             chat_id,
-            "📁 В папке packs/ нет .siq файлов.\nПоложите туда .siq файлы и используйте /loadpack <имя>",
-            message.bot, thread_id, parse_mode=None,
-        )
-        return
-    lines = ["📁 Доступные паки в packs/:\n"]
-    for i, f in enumerate(sorted(files), 1):
-        size_mb = os.path.getsize(os.path.join(PACKS_DIR, f)) / (1024 * 1024)
-        lines.append("{}. {} ({:.1f} МБ)".format(i, f, size_mb))
-    lines.append("\n💡 Используйте /loadpack <имя_файла> для загрузки")
-    await safe_send(chat_id, "\n".join(lines), message.bot, thread_id, parse_mode=None)
-
-
-@router.message(Command("loadpack"))
-async def cmd_loadpack(message: Message):
-    chat_id = message.chat.id
-    thread_id = get_thread_id(message)
-    parts = message.text.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        await safe_send(
-            chat_id,
-            "📦 Использование: /loadpack <имя_файла.siq>\n\nДоступные паки: /listpacks",
+            "📁 В папке packs/ нет .siq файлов.\n"
+            "Отправьте .siq файл прямо в этот чат чтобы загрузить пак.",
             message.bot, thread_id,
         )
         return
-    file_name = parts[1].strip()
-    file_path = os.path.join(PACKS_DIR, file_name)
-    if not os.path.exists(file_path):
-        await safe_send(chat_id, "❌ Файл '{}' не найден в packs/.".format(file_name),
-                        message.bot, thread_id, parse_mode=None)
-        return
-    if not file_name.lower().endswith('.siq'):
-        await safe_send(chat_id, "❌ Файл должен быть в формате .siq",
-                        message.bot, thread_id)
-        return
-    await safe_send(chat_id, "⏳ Загружаю и обрабатываю пак...", message.bot, thread_id)
-    try:
-        pack = parse_siq(file_path)
-        if not pack.rounds:
-            await safe_send(chat_id, "❌ Пак пустой — нет раундов.", message.bot, thread_id)
-            return
-        total_q = sum(len(t.questions) for r in pack.rounds for t in r.themes)
-        if total_q == 0:
-            await safe_send(chat_id, "❌ Пак пустой — нет вопросов.", message.bot, thread_id)
-            return
-        manager.store_pack(chat_id, pack)
-        info = get_pack_info(pack)
-        await safe_send(chat_id, "✅ Пак загружен!\n\n{}\n\n/newgame — создать игру".format(info),
-                        message.bot, thread_id, parse_mode=None)
-    except ValueError as e:
-        await safe_send(chat_id, "❌ Ошибка парсинга: {}".format(e), message.bot, thread_id)
-    except Exception as e:
-        logger.error("Pack load error: %s", e, exc_info=True)
-        await safe_send(chat_id, "❌ Ошибка: {}".format(e), message.bot, thread_id)
+    keyboard = _build_packs_keyboard(0, files)
+    await safe_send(chat_id, _packs_text(0, files), message.bot, thread_id,
+                    reply_markup=keyboard)
 
 
 @router.message(Command("packinfo"))
@@ -520,7 +531,7 @@ async def cmd_packinfo(message: Message):
     thread_id = get_thread_id(message)
     pack = manager.get_pack(chat_id)
     if pack is None:
-        await safe_send(chat_id, "📦 Пак не загружен. Отправьте .siq файл или используйте /loadpack",
+        await safe_send(chat_id, "📦 Пак не загружен. Используйте /listpacks",
                         message.bot, thread_id)
         return
     await safe_send(chat_id, get_pack_info(pack), message.bot, thread_id, parse_mode=None)
@@ -565,6 +576,39 @@ async def handle_document(message: Message):
 
 # ==================== INLINE КНОПКИ ====================
 
+async def _load_pack_by_filename(chat_id: int, thread_id, file_name: str, bot: Bot):
+    """Загружает пак по имени файла и сообщает результат."""
+    file_path = os.path.join(PACKS_DIR, file_name)
+    if not os.path.exists(file_path):
+        await safe_send(chat_id, "❌ Файл не найден: {}".format(file_name),
+                        bot, thread_id, parse_mode=None)
+        return
+    await safe_send(chat_id, "⏳ Загружаю пак *{}*...".format(file_name[:-4] if file_name.endswith('.siq') else file_name),
+                    bot, thread_id)
+    try:
+        pack = parse_siq(file_path)
+        if not pack.rounds:
+            await safe_send(chat_id, "❌ Пак пустой — нет раундов.", bot, thread_id)
+            return
+        total_q = sum(len(t.questions) for r in pack.rounds for t in r.themes)
+        if total_q == 0:
+            await safe_send(chat_id, "❌ Пак пустой — нет вопросов.", bot, thread_id)
+            return
+        manager.store_pack(chat_id, pack)
+        await safe_send(
+            chat_id,
+            "✅ Пак *{}* загружен!\n"
+            "Раундов: {}, вопросов: {}\n\n"
+            "/newgame — создать игру".format(pack.name, len(pack.rounds), total_q),
+            bot, thread_id,
+        )
+    except ValueError as e:
+        await safe_send(chat_id, "❌ Ошибка парсинга: {}".format(e), bot, thread_id)
+    except Exception as e:
+        logger.error("Pack load error: %s", e, exc_info=True)
+        await safe_send(chat_id, "❌ Ошибка: {}".format(e), bot, thread_id)
+
+
 @router.callback_query()
 async def handle_callback(callback: CallbackQuery):
     chat_id = callback.message.chat.id
@@ -572,6 +616,49 @@ async def handle_callback(callback: CallbackQuery):
     data = callback.data
     thread_id = callback.message.message_thread_id
     game = manager.get_game(chat_id)
+
+    # --- Пагинация паков ---
+    if data.startswith("packs_page_"):
+        try:
+            page = int(data.split("_")[-1])
+        except ValueError:
+            await callback.answer()
+            return
+        files = _get_siq_files()
+        if not files:
+            await callback.answer("Паков нет", show_alert=True)
+            return
+        keyboard = _build_packs_keyboard(page, files)
+        try:
+            await callback.message.edit_text(
+                _packs_text(page, files),
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
+        await callback.answer()
+        return
+
+    if data == "packs_noop":
+        await callback.answer()
+        return
+
+    # --- Загрузка пака по индексу ---
+    if data.startswith("loadpack_idx_"):
+        try:
+            idx = int(data.split("_")[-1])
+        except ValueError:
+            await callback.answer("Ошибка", show_alert=True)
+            return
+        files = _get_siq_files()
+        if idx < 0 or idx >= len(files):
+            await callback.answer("Пак не найден", show_alert=True)
+            return
+        file_name = files[idx]
+        await callback.answer("⏳ Загружаю...")
+        await _load_pack_by_filename(chat_id, thread_id, file_name, callback.message.bot)
+        return
 
     # --- Buzzer ---
     if data == "buzzer":
@@ -581,7 +668,6 @@ async def handle_callback(callback: CallbackQuery):
         if user_id not in game.players:
             await callback.answer("Вы не в игре! /join", show_alert=True)
             return
-        # Разрешаем нажать базер в QUESTION_ASKED и WAITING_ANSWER
         if game.state not in (GameState.QUESTION_ASKED, GameState.WAITING_ANSWER):
             await callback.answer("Сейчас нельзя")
             return
@@ -735,9 +821,8 @@ async def main():
         BotCommand(command="scores", description="Текущий счёт"),
         BotCommand(command="appeal", description="Подать апелляцию"),
         BotCommand(command="stop", description="Остановить игру"),
-        BotCommand(command="listpacks", description="Список локальных паков"),
-        BotCommand(command="loadpack", description="Загрузить пак из packs/"),
-        BotCommand(command="packinfo", description="Инфо о паке"),
+        BotCommand(command="listpacks", description="Список паков с выбором"),
+        BotCommand(command="packinfo", description="Инфо о текущем паке"),
     ]
     await bot.set_my_commands(commands)
     print("✅ Бот запущен!")
