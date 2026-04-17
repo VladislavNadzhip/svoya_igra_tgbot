@@ -61,7 +61,7 @@ class Appeal:
 
 @dataclass
 class SkipVote:
-    """\u0413олосование за скип раунда или темы."""
+    """Голосование за скип раунда или темы."""
     skip_type: str          # 'round' или 'theme'
     theme_idx: Optional[int]  # только для 'theme'
     votes_for: set = field(default_factory=set)
@@ -276,7 +276,17 @@ class Game:
         try:
             await asyncio.sleep(self.answer_timeout)
             if self.state == GameState.WAITING_ANSWER and self.current_answerer_id:
-                await self._process_wrong_answer(self.current_answerer_id)
+                user_id = self.current_answerer_id
+                # Сохраняем попытку с пометкой таймаута, чтобы апелляция видела игрока
+                attempt = AnswerAttempt(
+                    user_id=user_id,
+                    text="(время вышло)",
+                    timestamp=time.time(),
+                    is_correct=False,
+                    processed=True,
+                )
+                self.answer_attempts.append(attempt)
+                await self._process_wrong_answer(user_id)
         except asyncio.CancelledError:
             pass
 
