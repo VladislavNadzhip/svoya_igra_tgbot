@@ -251,6 +251,18 @@ def _get_element_text(el) -> str:
     return ''.join(el.itertext()).strip()
 
 
+def _get_step_text(step_el) -> str:
+    """
+    Извлекает текст из <step>: сначала пробует атрибут 'value',
+    затем текстовое содержимое элемента (включая CDATA и вложенные теги).
+    """
+    # Новый формат SIQ v6+ использует атрибут value
+    val = step_el.attrib.get('value', '')
+    if val:
+        return val.strip()
+    return _get_element_text(step_el)
+
+
 def _is_resource_name(text: str) -> bool:
     """
     Определяет, является ли текст именем ресурса (ссылкой на медиафайл).
@@ -404,7 +416,14 @@ def _parse_question(
             if step_type in _SKIP_ATOM_TYPES:
                 continue
 
-            step_text = _get_element_text(step_el)
+            # Получаем текст: сначала атрибут value (SIQ v6+), потом содержимое элемента
+            step_text = _get_step_text(step_el)
+
+            # Если step_type явно текстовый — используем текст напрямую, минуя resource-check
+            if step_type in _TEXT_ATOM_TYPES:
+                if step_text:
+                    question_text = _append_text(question_text, step_text)
+                continue
 
             if not step_text:
                 continue
