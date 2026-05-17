@@ -1365,6 +1365,7 @@ class Game:
                 f"останется одна. Первым убирает отстающий."
             )
 
+        await asyncio.sleep(1)
         if len(self.final_themes) <= 1:
             await self._final_start_betting()
         else:

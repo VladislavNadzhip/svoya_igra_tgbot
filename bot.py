@@ -9,6 +9,7 @@ import re
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, Router, F, types
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.types import (
@@ -63,21 +64,32 @@ async def safe_send(chat_id: int, text: str, bot: Bot,
                     thread_id: int | None = None,
                     reply_markup=None,
                     parse_mode=ParseMode.MARKDOWN):
-    try:
-        return await bot.send_message(
-            chat_id=chat_id, text=text, reply_markup=reply_markup,
-            parse_mode=parse_mode, message_thread_id=thread_id,
-        )
-    except Exception as e:
-        logger.error("Send error (markdown): %s", e)
+    for attempt in range(2):
+        try:
+            return await bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=reply_markup,
+                parse_mode=parse_mode, message_thread_id=thread_id,
+            )
+        except TelegramRetryAfter as e:
+            logger.warning("Flood control, waiting %ds then retry", e.retry_after)
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception as e:
+            logger.error("Send error (markdown): %s", e)
+            break
+    # Markdown failed — try plain text (also with one flood-control retry)
+    for attempt in range(2):
         try:
             return await bot.send_message(
                 chat_id=chat_id, text=text, reply_markup=reply_markup,
                 message_thread_id=thread_id,
             )
+        except TelegramRetryAfter as e:
+            logger.warning("Flood control (plain), waiting %ds then retry", e.retry_after)
+            await asyncio.sleep(e.retry_after + 1)
         except Exception as e2:
             logger.error("Send error (plain): %s", e2)
-            return None
+            break
+    return None
 
 
 # ==================== ПАГИНАТОР ПАКОВ ====================
@@ -288,6 +300,7 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
         round_name = g.current_round.name if g.current_round else "Раунд"
         header = "📊 *Конец раунда: {}*\n\n".format(round_name)
         await safe_send(g.chat_id, header + g.get_scores_text(), bot, thread_id)
+        await asyncio.sleep(1)
 
     async def announce_round_callback(g):
         r = g.current_round
@@ -297,7 +310,8 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
         themes = '\n'.join("  - {}".format(t.name) for t in r.themes)
         text = "🎦 *Раунд {}/{}: {}{}*\n\nТемы:\n{}".format(idx, total, r.name, rtype, themes)
         await safe_send(g.chat_id, text, bot, thread_id)
-        await asyncio.sleep(2)
+        delay = 4 if r.round_type == 'final' else 2
+        await asyncio.sleep(delay)
 
     async def announce_game_over_callback(g):
         await safe_send(g.chat_id, g.get_final_results_text(), bot, thread_id)
