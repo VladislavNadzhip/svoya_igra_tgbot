@@ -1279,7 +1279,7 @@ async def handle_callback(callback: CallbackQuery):
         if game.state != GameState.FINAL_THEME_ELIMINATION:
             await callback.answer("Сейчас нельзя исключать тему")
             return
-        if user_id != game.final_current_theme_eliminator:
+        if user_id != game._final_current_eliminator():
             await callback.answer("Сейчас выбирает другой игрок", show_alert=True)
             return
         try:
