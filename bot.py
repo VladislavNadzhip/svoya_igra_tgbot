@@ -5,6 +5,7 @@ Telegram-бот "Своя Игра" на aiogram 3.x.
 """
 
 import os
+import re
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, Router, F, types
@@ -44,6 +45,15 @@ router = Router()
 
 
 # ==================== УТИЛИТЫ ====================
+
+def escape_md(text: str) -> str:
+    """Экранирует спецсимволы MarkdownV1."""
+    if not text:
+        return ""
+    # В MarkdownV1 (который aiogram называет MARKDOWN) нужно экранировать: _ * ` [
+    # Но обычно достаточно экранировать те, что ломают парсинг при непарном использовании.
+    return text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
+
 
 def get_thread_id(message: Message) -> int | None:
     return message.message_thread_id
@@ -187,7 +197,11 @@ def _apply_callbacks(game: Game, bot: Bot, thread_id: int | None):
                 logger.error("send_document video fallback failed: %s", e2)
 
     async def show_board_callback(g):
-        keyboard = _build_board_keyboard(g)
+        # Для финала используем специальную клавиатуру
+        if g.state == GameState.FINAL_THEME_ELIMINATION:
+            keyboard = g._build_final_keyboard()
+        else:
+            keyboard = _build_board_keyboard(g)
         await safe_send(g.chat_id, g.get_board_text(), bot, thread_id, reply_markup=keyboard)
 
     async def show_buzzer_callback(g):
@@ -378,6 +392,7 @@ async def cmd_start(message: Message):
         "📋 *Команды:*\n"
         "/newgame — создать новую игру\n"
         "/join — присоединиться\n"
+        "/joinanytime — присоединиться к идущей игре\n"
         "/leave — покинуть\n"
         "/startgame — начать\n"
         "/scores — счёт\n"
@@ -478,13 +493,13 @@ async def cmd_join(message: Message):
         return
     if game.add_player(user.id, user.username or "", display_name):
         players_list = '\n'.join(
-            "  {}. {}".format(i + 1, p.display_name)
+            "  {}. {}".format(i + 1, escape_md(p.display_name))
             for i, p in enumerate(game.get_players_list())
         )
         await safe_send(
             chat_id,
             "✅ *{}* присоединился!\n\n👥 Игроки ({}):\n{}".format(
-                display_name, game.get_player_count(), players_list
+                escape_md(display_name), game.get_player_count(), players_list
             ),
             message.bot, thread_id,
         )
@@ -506,6 +521,50 @@ async def cmd_leave(message: Message):
                         message.bot, thread_id)
     else:
         await safe_send(chat_id, "ℹ️ Вы не в игре.", message.bot, thread_id)
+
+
+@router.message(Command("joinanytime"))
+async def cmd_join_anytime(message: Message):
+    chat_id = message.chat.id
+    thread_id = get_thread_id(message)
+    user = message.from_user
+    game = manager.get_game(chat_id)
+    if game is None:
+        await safe_send(chat_id, "ℹ️ Нет активной игры. Используйте /newgame",
+                        message.bot, thread_id)
+        return
+    # Проверяем, что игра не завершена и не в финале
+    if game.state == GameState.GAME_OVER:
+        await safe_send(chat_id, "ℹ️ Игра уже завершена.",
+                        message.bot, thread_id)
+        return
+    if game.state == GameState.FINAL_SHOWING_RESULTS:
+        await safe_send(chat_id, "ℹ️ Финал уже завершен.",
+                        message.bot, thread_id)
+        return
+    # Проверяем, что игрок не в игре
+    if user.id in game.players:
+        await safe_send(chat_id, "ℹ️ Вы уже в игре!",
+                        message.bot, thread_id)
+        return
+    # Проверяем, что игра уже началась (не в лобби)
+    if game.state == GameState.LOBBY:
+        await safe_send(chat_id, "ℹ️ Игра еще не началась. Используйте /join",
+                        message.bot, thread_id)
+        return
+    # Создаем нового игрока с 0 очками
+    display_name = user.first_name or "Player"
+    if user.last_name:
+        display_name += " {}".format(user.last_name)
+    if game.add_player(user.id, user.username or "", display_name):
+        await safe_send(
+            chat_id,
+            "✅ *{}* присоединился к игре с 0 очками!".format(escape_md(display_name)),
+            message.bot, thread_id,
+        )
+    else:
+        await safe_send(chat_id, "ℹ️ Не удалось присоединиться к игре.",
+                        message.bot, thread_id)
 
 
 @router.message(Command("startgame"))
@@ -573,6 +632,14 @@ async def cmd_appeal(message: Message):
     if game.current_appeal is not None:
         await safe_send(chat_id, "⚠️ Апелляция уже идёт!", message.bot, thread_id)
         return
+    _apply_callbacks(game, message.bot, thread_id)
+    # Апелляция в финале (после показа результатов)
+    if game.state == GameState.FINAL_SHOWING_RESULTS:
+        success = await game.start_final_appeal(user_id, "")
+        if not success:
+            await safe_send(chat_id, "⚠️ Сейчас нельзя подать апелляцию.",
+                            message.bot, thread_id)
+        return
     in_current = user_id in game.failed_answerers
     in_last = user_id in game.last_failed_answerers
     if not in_current and not in_last:
@@ -582,7 +649,6 @@ async def cmd_appeal(message: Message):
             message.bot, thread_id,
         )
         return
-    _apply_callbacks(game, message.bot, thread_id)
     success = await game.start_appeal(user_id, "")
     if not success:
         await safe_send(chat_id, "⚠️ Сейчас нельзя подать апелляцию.",
@@ -1004,59 +1070,20 @@ async def handle_callback(callback: CallbackQuery):
         if game is None or not game.is_host(user_id):
             await callback.answer("Только ведущий", show_alert=True)
             return
-        # Ищем текущего отвечающего
-        target_id = game.current_answerer_id
-        if target_id is None:
-            # последний ошибшийся
-            for att in reversed(game.answer_attempts):
-                if not att.is_correct:
-                    target_id = att.user_id
-                    break
-        if target_id is None or target_id not in game.players:
-            await callback.answer("Нет отвечающего игрока", show_alert=True)
-            return
-        player = game.players[target_id]
-        q = game.current_question
-        if q is None:
-            await callback.answer("Нет текущего вопроса", show_alert=True)
-            return
         _apply_callbacks(game, callback.message.bot, thread_id)
-        game._cancel_answer_timer()
-        game._cancel_buzzer_timer()
-        if game.remove_buzzer_callback:
-            await game.remove_buzzer_callback(game)
-        # Засчитываем как верный
-        game.question_answered_correctly = True
-        game.correct_answerer_id = target_id
-        if target_id in game.failed_answerers:
-            player.score += q.price * 2  # вернуть штраф + дать очки
-            game.failed_answerers.discard(target_id)
-        else:
-            player.score += q.price
-        game.chooser_id = target_id
-        game.state = GameState.SHOWING_ANSWER
-        await safe_send(
-            chat_id,
-            "✅ Ведущий засчитал ответ *{}*!\n"
-            "💰 Счёт: {}".format(player.display_name, player.score),
-            callback.message.bot, thread_id,
-        )
-        game._save_last_question_data()
-        await game._after_question()
-        await callback.answer("Засчитано!")
+        ok = await game.host_mark_correct(user_id)
+        await callback.answer("Засчитано!" if ok else "Сейчас нельзя",
+                              show_alert=not ok)
         return
 
     if data == "host_mark_wrong":
         if game is None or not game.is_host(user_id):
             await callback.answer("Только ведущий", show_alert=True)
             return
-        target_id = game.current_answerer_id
-        if target_id is None or target_id not in game.players:
-            await callback.answer("Нет отвечающего игрока", show_alert=True)
-            return
         _apply_callbacks(game, callback.message.bot, thread_id)
-        await game._process_wrong_answer(target_id)
-        await callback.answer("Снято!")
+        ok = await game.host_mark_wrong(user_id)
+        await callback.answer("Снято!" if ok else "Сейчас нельзя",
+                              show_alert=not ok)
         return
 
     # --- Ведущий: изменение очков ---
@@ -1189,7 +1216,7 @@ async def handle_callback(callback: CallbackQuery):
         if user_id not in game.players:
             await callback.answer("Вы не в игре!", show_alert=True)
             return
-        if game.state != GameState.APPEAL:
+        if game.state not in (GameState.APPEAL, GameState.FINAL_APPEAL):
             await callback.answer("Апелляции нет")
             return
         _apply_callbacks(game, callback.message.bot, thread_id)
@@ -1244,6 +1271,30 @@ async def handle_callback(callback: CallbackQuery):
             await callback.answer()
         return
 
+    # --- Финал: исключение темы ---
+    if data.startswith("final_eliminate_"):
+        if game is None:
+            await callback.answer("Нет игры")
+            return
+        if game.state != GameState.FINAL_THEME_ELIMINATION:
+            await callback.answer("Сейчас нельзя исключать тему")
+            return
+        if user_id != game._final_current_eliminator():
+            await callback.answer("Сейчас выбирает другой игрок", show_alert=True)
+            return
+        try:
+            theme_idx = int(data.split("_")[2])
+        except (IndexError, ValueError):
+            await callback.answer()
+            return
+        _apply_callbacks(game, callback.message.bot, thread_id)
+        success = await game.finalize_theme_elimination(user_id, theme_idx)
+        if success:
+            await callback.answer("Тема убрана!")
+        else:
+            await callback.answer("Сейчас не ваш ход", show_alert=True)
+        return
+
     await callback.answer()
 
 
@@ -1265,12 +1316,41 @@ async def handle_text(message: Message):
     game = manager.get_game(chat_id)
     if game is None:
         return
-    if game.state != GameState.WAITING_ANSWER:
+    state = game.state
+
+    # Обычный ответ на вопрос
+    if state == GameState.WAITING_ANSWER:
+        if user_id != game.current_answerer_id:
+            return
+        _apply_callbacks(game, message.bot, thread_id)
+        await game.submit_answer(user_id, text)
         return
-    if user_id != game.current_answerer_id:
+
+    # Финал: ставка текущего игрока
+    if state == GameState.FINAL_BETTING:
+        if user_id != game._final_current_bettor():
+            return
+        m = re.search(r'-?\d+', text.replace(' ', ''))
+        if not m:
+            await safe_send(chat_id, "⚠️ Ставка должна быть числом.",
+                            message.bot, thread_id)
+            return
+        bet = int(m.group())
+        _apply_callbacks(game, message.bot, thread_id)
+        res = await game.submit_final_bet(user_id, bet)
+        if res == 'bad_amount':
+            p = game.players.get(user_id)
+            mx = p.score if p else 0
+            await safe_send(chat_id,
+                            "⚠️ Ставка должна быть числом от 1 до {}.".format(mx),
+                            message.bot, thread_id)
         return
-    _apply_callbacks(game, message.bot, thread_id)
-    await game.submit_answer(user_id, text)
+
+    # Финал: ответ в окне
+    if state == GameState.FINAL_ANSWER_WINDOW:
+        _apply_callbacks(game, message.bot, thread_id)
+        await game.record_final_answer(user_id, text)
+        return
 
 
 # ==================== MAIN ====================
@@ -1279,7 +1359,7 @@ async def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Укажите BOT_TOKEN в config.py!")
         return
-    print("🚀 Запуск бота Своя Игра (aiogram)...")
+    print("Starting bot...")
     print("📁 Папка паков: {}".format(PACKS_DIR))
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = Dispatcher()
@@ -1289,6 +1369,7 @@ async def main():
         BotCommand(command="help", description="Правила игры"),
         BotCommand(command="newgame", description="Создать новую игру"),
         BotCommand(command="join", description="Присоединиться"),
+        BotCommand(command="joinanytime", description="Присоединиться к идущей игре"),
         BotCommand(command="leave", description="Покинуть игру"),
         BotCommand(command="startgame", description="Начать игру"),
         BotCommand(command="scores", description="Текущий счёт"),
