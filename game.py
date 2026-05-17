@@ -98,7 +98,7 @@ class Appeal:
 
 @dataclass
 class SkipVote:
-    """\u0413олосование за скип раунда или темы."""
+    """Голосование за скип раунда или темы."""
     skip_type: str          # 'round' или 'theme'
     theme_idx: Optional[int]  # только для 'theme'
     votes_for: set = field(default_factory=set)
