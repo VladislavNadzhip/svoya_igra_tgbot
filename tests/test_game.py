@@ -281,12 +281,11 @@ class TestFinal(GameTestBase):
         self.assertEqual(g.state, GameState.FINAL_ANSWER_WINDOW)
 
         self.assertTrue(await g.record_final_answer(self.P1, correct))
+        # после последнего ответа оценка запускается автоматически
         self.assertTrue(await g.record_final_answer(self.P2, "ерунда"))
-        # повторный ответ не принимается
-        self.assertFalse(await g.record_final_answer(self.P1, "другое"))
-
-        await g._final_evaluate()
         self.assertEqual(g.state, GameState.FINAL_SHOWING_RESULTS)
+        # повторный ответ не принимается (игра уже оценена)
+        self.assertFalse(await g.record_final_answer(self.P1, "другое"))
         self.assertEqual(g.players[self.P1].score, 150)   # 100 + 50
         self.assertEqual(g.players[self.P2].score, 100)    # 200 - 100
 
