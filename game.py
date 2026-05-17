@@ -42,10 +42,10 @@ APPEAL_TIMEOUT = 20
 
 # Финал
 FINAL_BET_TIMEOUT = 45        # секунд на ставку одного игрока
-FINAL_COUNTDOWN_SECONDS = 5   # обратный отсчёт перед окном ответа
-FINAL_ANSWER_WINDOW = 5       # окно для ввода ответа в чат (сек)
-FINAL_APPEAL_TIMEOUT = 20     # время на голосование по апелляции в финале
-FINAL_RESULTS_APPEAL_WINDOW = 30  # сколько ждать апелляций после результатов
+FINAL_COUNTDOWN_SECONDS = 20  # обратный отсчёт перед окном ответа
+FINAL_ANSWER_WINDOW = 60      # окно для ввода ответа в чат (сек)
+FINAL_APPEAL_TIMEOUT = 60     # время на голосование по апелляции в финале
+FINAL_RESULTS_APPEAL_WINDOW = 60  # сколько ждать апелляций после результатов
 
 
 def _locked(coro):
@@ -1534,8 +1534,9 @@ class Game:
         if self.send_callback:
             await self.send_callback(
                 self,
-                f"⏱️ Готовьтесь! Окно для ответа откроется через "
-                f"{FINAL_COUNTDOWN_SECONDS} сек."
+                f"⏱️ *Готовьтесь!* Прочитайте вопрос выше.\n"
+                f"Через {FINAL_COUNTDOWN_SECONDS} сек. откроется окно — "
+                f"пишите ответ в чат."
             )
         self._cancel_final_timer()
         self._final_task = asyncio.create_task(self._final_countdown_handler())
@@ -1553,10 +1554,14 @@ class Game:
         self.state = GameState.FINAL_ANSWER_WINDOW
         self.final_answers.clear()
         if self.send_callback:
+            names = ", ".join(
+                self._final_player_label(u) for u in self.final_players
+            )
             await self.send_callback(
                 self,
-                f"✍️ *Пишите ответ в чат!* У вас {FINAL_ANSWER_WINDOW} секунд. "
-                f"Засчитывается первое сообщение."
+                f"✍️ *Пишите ответ в чат!* ({names})\n"
+                f"У вас {FINAL_ANSWER_WINDOW} секунд. "
+                f"Засчитывается первое сообщение от каждого."
             )
         self._cancel_final_timer()
         self._final_task = asyncio.create_task(self._final_window_handler())
@@ -1580,6 +1585,15 @@ class Game:
         if user_id in self.final_answers:
             return False
         self.final_answers[user_id] = text
+        player = self.players.get(user_id)
+        if self.send_callback and player:
+            await self.send_callback(
+                self,
+                f"✅ *{self._safe_name(player)}* записал ответ: _{self._esc(text)}_"
+            )
+        if len(self.final_answers) >= len(self.final_players):
+            self._cancel_final_timer()
+            await self._final_evaluate()
         return True
 
     # ---------- Результаты ----------
